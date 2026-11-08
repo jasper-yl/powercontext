@@ -296,14 +296,14 @@ class IncidentReports:
                 current = await tx.get(match.artifact_id) if match else None
                 artifact_id = current.ref.artifact_id if current else writer.stable_id(
                     "report", source.ref.source_type, source.ref.source_id)
-                ref = await tx.put(
+                written = await tx.put(
                     artifact_id,
                     content={"title": self.config.title_prefix, "summary": summary},
                     search_text=summary,
                     source_refs=[source.ref],
                 )
                 # With the real artifact_id and revision in hand, upsert into the plugin's own index by ID
-                await self.index.upsert(request.scope_id, ref.artifact_id, ref.revision, vector)
+                await self.index.upsert(request.scope_id, written.ref.artifact_id, written.ref.revision, vector)
         # The block ended normally: core commits the Artifact writes, the cursor advance, and the acknowledgment
 
 
@@ -338,16 +338,22 @@ Artifact generation supports three call origins in any combination; at least one
 
 | Configuration | When a Worker is dispatched | `request.reason` |
 | --- | --- | --- |
-| `schedule: {interval_seconds: N}` or `schedule: {cron: "0 2 * * *", timezone: Asia/Shanghai}` | When due, for Scopes with pending work | `schedule` |
-| `on_sources: true` | The Scope's Source journal is ahead of the plugin's cursor | `sources` |
+| `schedule: {interval_seconds: N}` or `schedule: {cron: "0 2 * * *", timezone: Asia/Shanghai}` | When due, for Scopes with pending work | `sources` when new Sources exist, otherwise `schedule` |
+| `on_sources: true` | The Scope's Source journal is ahead of the plugin's cursor; dispatched within about 2 seconds | `sources` |
 | `manual: true` | The manual trigger interface is called | `manual` |
 
 - For plugins with `inputs`, every call carries that Scope's unconsumed Source window; when the window is empty,
   scheduled and Source-triggered calls skip the plugin and acknowledge completion directly.
-- Plugins without `inputs` (for example, a daily cleanup of existing Artifacts) consume no Sources, are called when
-  due, and must configure `scopes` explicitly.
+- Plugins without `inputs` (for example, a daily cleanup of existing Artifacts) consume no Sources and are called once
+  for each Scope in `scopes` when due; they must configure `scopes` explicitly and support only `interval_seconds` in the
+  first version.
+- `cron` applies only to plugins with `inputs` and cannot be combined with `on_sources`: each Supervisor binding accepts
+  one interval or one cron policy.
 - Manual triggers always call the plugin and may carry `params`, which the plugin interprets. A manual request is
-  persisted on acceptance and returns `202 Accepted`; it still runs after a Server restart.
+  persisted on acceptance and returns `202 Accepted`; it still runs after a Server restart. Requests are **not
+  coalesced**: the plugin receives every request accepted since its last successful commit, in acceptance order, in
+  `request.requests`. Plugins can carry user commands in them (for example, "forget this memory"), and an earlier command
+  is never overwritten by a later request.
 
 Source plugin `collect` supports `schedule` and `manual`
 (`POST /v1/scopes/{scope_id}/sources/plugins/{name}/collect`); adding or re-enabling a target also requests a collection.
@@ -488,10 +494,11 @@ class GenerateRequest(BaseModel):
     scope_id: str
     reason: Literal["schedule", "sources", "manual"]
     sources: Sequence[GenerationSource]   # This window; empty when inputs is not configured
-    params: JsonValue | None = None       # Manual triggers only
+    requests: Sequence[JsonValue] = ()    # Every manual request accepted since the last successful commit, in order
 
 class GenerationSource(BaseModel):
     ref: SourceRef                        # Exact Source reference
+    position: int                         # Journal position, for processing in collection order
     projection: JsonValue                 # Content of the Projection named by inputs.projection
 
 class ArtifactWriter(ArtifactReads):
@@ -510,7 +517,7 @@ class ArtifactTransaction(ArtifactReads):
   transaction) and does slow work such as model calls and vector computation.
 - **The write transaction block**: `async with writer.transaction() as tx:`. When the block starts, core opens a write
   transaction and rechecks the Supervisor lease and invocation intent. Writes in the block execute directly in that
-  transaction and immediately return a real `ArtifactRef` (with revision), and reads in the block see what the block has
+  transaction and immediately return the written `ArtifactSnapshot` (with its exact revision), and reads in the block see what the block has
   written. When the block ends normally, core CAS-advances the cursor, acknowledges the call, and commits, all in the same
   transaction. If the block raises, exceeds `transaction_timeout_seconds`, or conflicts at commit, the transaction rolls
   back entirely and the call fails.
@@ -532,11 +539,11 @@ implementation and validation rules and raises immediately on a violation:
 
 | Operation | Reused core implementation | Semantics |
 | --- | --- | --- |
-| `put(artifact_id, *, content, search_text=None, source_refs=(), artifact_refs=())` | `ArtifactRepository.create` / `revise` | Creates revision 1 when absent; otherwise appends a revision against the current head. When content and `search_text` equal the current revision, it is a no-op returning the current reference |
-| `revert(artifact_id, *, to_revision, reason)` | The rollback path of `revise` | Appends a new revision with a historical revision's content, recording `restored_from_revision` and the reason |
-| `set_lifecycle(artifact_id, state, *, replacement_artifact_id=None)` | `ArtifactGovernanceRepository.transition` | active ↔ deprecated (optionally naming a replacement), any state → retired (irreversible). Changes the head's governance state without appending a revision; frozen merge inputs cannot change individually |
-| `merge(inputs, *, into, content, search_text=None, source_refs=())` | The shared merge method ([RFC #1859](1859_artifact_merge.md)) | Takes the current revisions of `inputs`, creates `into`, records the merge relation, and freezes the inputs. `into` must be a new ID |
-| `preview_undo_merge(artifact_id)` / `undo_merge(artifact_id, *, preview=None)` | Preview and restoration of the shared merge method | Undoes the merge that produced the Artifact, restoring inputs and retiring the result; when executing a preview, stale previews are rejected if related state changed |
+| `put(artifact_id, *, content, search_text=None, source_refs=(), artifact_refs=(), expected_revision=None)` | The change path of the shared merge method (`ArtifactRepository.create` / `revise`) | Creates revision 1 when absent; otherwise appends a revision against the current head. With `expected_revision`, a different current revision is a conflict, for optimistic concurrency between reads outside and writes inside the transaction. When content and `search_text` equal the current revision, it is a no-op returning the current snapshot |
+| `revert(artifact_id, *, to_revision)` | The shared restoration method with a selected revision | Appends a new revision with a historical revision's content, recording `restored_from_revision`; a forgotten or merge-frozen target is restored along with it |
+| `set_lifecycle(artifact_id, state, *, replacement_artifact_id=None)` | The shared forget and restore methods; `ArtifactGovernanceRepository.transition` for a replacement or retirement | `deprecated` forgets and `active` restores: a merge-frozen input undoes the merges that froze it, as a group. `retired` is irreversible. Changing governance state alone appends no revision |
+| `merge(inputs, *, into, content, search_text=None, source_refs=(), artifact_refs=())` | The shared merge method ([RFC #1859](1859_artifact_merge.md)) | Takes the current revisions of `inputs`, creates `into`, records the merge relation, and freezes the inputs. `into` must be a new ID; when the same inputs are merged again after an undo, plugins should include input revisions in `stable_id` so the result does not collide with the retired one |
+| `preview_undo_merge(artifact_id)` / `undo_merge(artifact_id)` | Preview and restoration of the shared merge method | Undoes the merge that produced the Artifact, restoring inputs and retiring the result, and returns exact references of what was restored and retired |
 | `bind_handle(handle_key, ref)` | Artifact handle binding | Binds a stable handle to a given revision |
 | `set_tags(artifact_id, tags)` | Artifact tag replacement | Replaces the Artifact's tags entirely |
 
@@ -546,6 +553,8 @@ implementation and validation rules and raises immediately on a violation:
   family or Scope.
 - `source_refs` may reference only Sources in this window; `artifact_refs`, `to_revision`, and `bind_handle` targets must
   be revisions that actually exist in this family.
+- Core stores the plugin's `search_text` with each revision, so restoring an old revision restores its search text with
+  its content; public reads return only `content`.
 - Operation count, single-content size, and total bytes per write transaction block are bounded; exceeding a limit
   raises and rolls back, without truncation or partial commit.
 - Core neither validates the business structure of `content` nor stores or freezes a schema. The plugin owns content
@@ -557,25 +566,35 @@ implementation and validation rules and raises immediately on a violation:
 seeing what the block has written) offer the same read methods, scoped to this Scope and this family:
 
 ```python
+class ArtifactSnapshot(BaseModel):
+    ref: ArtifactRef                      # Exact revision
+    content: dict[str, JsonValue]
+    search_text: str | None
+    lineage: ArtifactLineage              # Directly referenced Sources and Artifacts
+    lifecycle_state: LifecycleState       # active / deprecated / retired
+    merged_into_id: str | None            # The merge result when frozen as a merge input
+    replacement_artifact_id: str | None
+    governance_generation: int            # Governance version, to detect changes after a read
+
 class ArtifactReads(Protocol):
     async def get(self, artifact_id: str, *, revision: int | None = None) -> ArtifactSnapshot | None: ...
-    async def revisions(self, artifact_id: str, *, cursor: str | None = None, limit: int = 50) -> RevisionPage: ...
+    async def revisions(self, artifact_id: str, *, cursor: str | None = None, limit: int = 50) -> ArtifactPage: ...
     async def list(self, *, states: Collection[LifecycleState] = ("active",), tags: Collection[str] = (),
                    cursor: str | None = None, limit: int = 50) -> ArtifactPage: ...
-    async def search(self, query: str, *, states: Collection[LifecycleState] = ("active",),
-                     limit: int = 10) -> Sequence[ArtifactSnapshot]: ...
-    async def by_source(self, ref: SourceRef, *, cursor: str | None = None, limit: int = 50) -> ArtifactRefPage: ...
-    async def lineage(self, ref: ArtifactRef) -> ArtifactLineage: ...
-    async def governance(self, artifact_id: str) -> ArtifactGovernance: ...    # Lifecycle, replacement, merge ownership
-    async def merge_record(self, artifact_id: str) -> ArtifactMergeRecord | None: ...
-    async def tags(self, artifact_id: str) -> ArtifactTagSet: ...
+    async def search(self, query: str, *, limit: int = 10) -> Sequence[ArtifactSnapshot]: ...
+    async def by_source(self, ref: SourceRef) -> Sequence[ArtifactSnapshot]: ...
+    async def merge_inputs(self, artifact_id: str) -> Sequence[ArtifactRef]: ...
+    async def tags(self, artifact_id: str) -> Sequence[str]: ...
     async def resolve_handle(self, handle_key: str) -> ArtifactRef | None: ...
 ```
 
-- `get` reads the current content or a given revision; `revisions` lists the full history.
-- `list` and `search` can filter by lifecycle state, including deprecated, retired, and frozen merge inputs, to find
-  "data that already existed". `search` is core's text search (see section 5); inside the write transaction it finds
-  content the block has written but not yet committed.
+- A snapshot carries the exact revision, lineage, and current governance state, so plugins need no separate lineage or
+  lifecycle reads.
+- `get` reads the current content or a given revision; `revisions` lists the full history; `merge_inputs` reads the exact
+  inputs of a merge result.
+- `list` can filter by lifecycle state and tags, including deprecated, retired, and frozen merge inputs, to find "data
+  that already existed". `search` is core's text search (see section 5) and covers only active current revisions; inside
+  the write transaction it finds content the block has written but not yet committed.
 - `by_source` finds Artifacts whose lineage references a Source, so plugins can locate Artifacts to revise after a
   Source changes.
 - Snapshots returned by reads carry exact revisions and can be used directly as `artifact_refs` or `to_revision` in
@@ -609,6 +628,10 @@ transaction. Core does not guarantee consistency between them; the plugin does. 
 3. Check results read from plugin-owned storage with `get`, confirming the Artifact exists in core with a matching
    revision; ignore mismatched entries, or periodically rebuild from core data.
 
+**Manual requests**: like the window, requests are removed only in the commit transaction. When a call fails, its
+requests remain and the next call receives them again in the same order, so plugins must handle requests idempotently
+too. A request that always fails keeps blocking later calls for that Scope; see Unresolved questions.
+
 `generate` itself may run more than once due to retries, so model calls and external requests issued by the plugin are
 not exactly once.
 
@@ -635,12 +658,16 @@ Worker receives (plugin:<name>, scope_id, request_generation)
 - The cursor advances only in the executor's commit transaction; plugins never receive its value and have no write
   interface for it. The cursor CAS ensures a window commits only once even if leadership changes or duplicate dispatch
   happens between reading the window and committing.
-- `on_sources` reuses the existing `SourceProcessingPendingProvider`: when the journal high watermark exceeds the
-  cursor, the Scope is marked pending and the Supervisor dispatches within budget. The check uses persisted data, so a
-  Server restart loses no pending input.
+- Pending work is found in two ways: Source writes in the Server process mark the plugin bindings that watch that Scope as
+  pending, and at startup the existing `SourceProcessingPendingProvider` catches up Sources written by other processes by
+  comparing the journal high watermark with the cursor. The Supervisor admits pending Scopes only when the binding's
+  interval or cron is due, so `on_sources` maps to an admission interval of about 2 seconds. The check uses persisted
+  data, so a Server restart loses no pending input.
 - Manual triggers and target additions reuse existing invocation intents
-  (`ArtifactProcessingIntentRepository.request`): the acceptance transaction advances the requested generation,
-  multiple requests coalesce, and requests arriving during a run are handled by a later call.
+  (`ArtifactProcessingIntentRepository.request`): the acceptance transaction advances the requested generation, multiple
+  requests coalesce into one call, and requests arriving during a run are handled by a later call. The parameters of
+  manual requests are kept in order in the Scope's plugin request queue and removed with the call's commit (see
+  section 6).
 - Without `scopes`, automatic scheduling applies to every Scope whose journal is ahead of the cursor; with `scopes`,
   both automatic scheduling and manual triggers accept only listed Scopes.
 
@@ -684,6 +711,10 @@ see the new code; deployers should restart Server after changes, and the first v
 - **Lock impact of the write transaction**: while the write transaction block is open, it locks the heads and cursor row
   it touches; on SQLite, a write transaction blocks all other writes to the database. The block must therefore be short,
   and exceeding its limit rolls it back.
+- **Database access**: Workers open the database without creating tables; the Server prepares the schema. The existing
+  database readiness check requires every pending invocation intent to name a durably registered binding; `plugin:`
+  bindings are decided by the plugin directory at startup, so the check admits them, and intents left by a removed
+  plugin are no longer processed.
 - **Failure and backoff**: a failed call commits no core data, and that plugin and Scope enter the Supervisor's existing
   backoff without affecting other Scopes or plugins. Core never skips input automatically after repeated failures;
   persistent failures require fixing the plugin or data and restarting. A target that keeps failing during collect
@@ -702,8 +733,11 @@ Core handles all public reads of plugin families without running plugin code:
 - search is a generic text search core adds for plugin families; like the existing search interface, it accepts only
   text queries. On write, `search_text` passes through existing lexical analysis into `pc_artifact_heads.searchable_text`,
   and search matches on that column, returning only revisions in the requested Scope that the caller may read. Artifacts
-  without `search_text` are not searchable. The writer's `search` uses the same implementation. The implementation PR
-  specifies the search method on SQLite and OceanBase and validates it at scale.
+  without `search_text` are not searchable. The writer's `search` uses the same implementation. On SQLite it shares
+  `pc_artifact_fts` with Experience and Skill: rebuilding that helper backfills every head with search text, and the
+  readiness check compares only built-in family rows. The implementation PR specifies the search method on OceanBase and
+  validates it at scale.
+- list returns metadata-only items whose `title` and `summary` are empty for plugin families; content is read with get.
 - Review, Recall, and Prepared Context are not available for plugin families in the first version, nor are the public
   create, revise, merge, lifecycle, handle, and tag write interfaces; writes to plugin families come only from the
   plugin. Those interfaces return an explicit "unsupported" error, and `GET /v1/capabilities` reflects the operations
@@ -716,7 +750,7 @@ Core handles all public reads of plugin families without running plugin code:
 | `pc_sources`, Projections, the Source journal, `pc_source_definition_manifests` | Kept; results of Source plugins |
 | `pc_artifacts`, `pc_artifact_heads`, `pc_artifact_lineage_*`, merge records, handles, tags | Kept; results of Artifact plugins |
 | `pc_source_cursors` | Kept; Artifact plugin consumption cursors keyed by `(scope_id, plugin:<name>)` |
-| `pc_connector_checkpoints` | Kept; per-target checkpoints keyed by `(scope_id, target binding ID)` |
+| `pc_connector_checkpoints` | Kept; per-target checkpoints keyed by `(scope_id, target binding ID)`; in the first version one row `(scope_id, plugin:<name>#requests)` also holds the Scope's manual request queue (at most 100 requests of up to 64 KiB each), to become a dedicated table later |
 | `pc_source_collect_targets` | Added; collection targets: Scope, plugin name, target key, normalized input, enabled state, creation and update times, latest successful collection time, latest failure category |
 | Supervisor invocation intent, pending, and lease tables | Kept; shared by plugin and built-in bindings |
 | Columns added for plugins to `pc_artifact_processing_binding_states` (`plugin_id`, `plugin_family`, `binding_generation`, `desired_state`, `phase`, `last_error`) | Removed |
@@ -838,6 +872,12 @@ data and their progress, leaving the rest to plugins.
 | Shared model client | Whether `PluginContext` should expose Server's configured model client so LLM plugins need not bring their own credentials, with usage counted in existing model usage statistics |
 | Deleting collection targets | The first version supports only disabling and re-enabling. Whether to fully delete a target and its checkpoint, and how to treat Sources already collected |
 | Plugin families in Recall / Prepared Context | Requires candidate content and budget constraints; suggested as a separate proposal |
+| Synchronous user commands | User operations such as forget, restore, undo merge, and edit currently run only as asynchronous manual requests (`202 Accepted`); callers get no immediate result, and there is no restoration preview and confirmation like built-in Atomic Memory's. Whether to add an optional synchronous command interface that the Server runs in a Worker and waits for |
+| Window size fallback | Built-in Atomic Memory shrinks the next Source window after a model timeout. Plugins cannot influence the window size, so an oversized window keeps timing out. Whether plugins may request a smaller window for the Scope through an agreed exception |
+| Persistently failing requests and windows | A manual request or Source window that always fails blocks later calls for that Scope. Whether to offer an operation that skips or dead-letters it, and how skipped input is recorded |
+| Consuming every Source type | `inputs.source_types` lists types one by one, while built-in Atomic Memory consumes every generation-eligible Source. Whether to support `"*"` for all types |
+| Built-in-only capabilities | Scope Prompt management, the write gate with decision observations, and model usage statistics serve only built-in families, and plugins cannot use them. Whether and how to open them to plugins |
+| Request queue storage | The first version keeps the manual request queue in `pc_connector_checkpoints` to avoid a new migration; whether to move it to a dedicated table with listing and cleanup of backlogged requests |
 
 # Future possibilities
 

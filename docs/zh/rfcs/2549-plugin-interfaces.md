@@ -272,14 +272,14 @@ class IncidentReports:
                 current = await tx.get(match.artifact_id) if match else None
                 artifact_id = current.ref.artifact_id if current else writer.stable_id(
                     "report", source.ref.source_type, source.ref.source_id)
-                ref = await tx.put(
+                written = await tx.put(
                     artifact_id,
                     content={"title": self.config.title_prefix, "summary": summary},
                     search_text=summary,
                     source_refs=[source.ref],
                 )
                 # 拿到真实的 artifact_id 与 revision 后写入自有索引，按 ID upsert
-                await self.index.upsert(request.scope_id, ref.artifact_id, ref.revision, vector)
+                await self.index.upsert(request.scope_id, written.ref.artifact_id, written.ref.revision, vector)
         # 块正常结束：core 提交 Artifact 写入、游标推进与完成确认
 
 
@@ -311,15 +311,19 @@ Artifact 生成支持三种调用来源，可以任意组合，至少配置一�
 
 | 配置 | 何时派发 Worker | `request.reason` |
 | --- | --- | --- |
-| `schedule: {interval_seconds: N}` 或 `schedule: {cron: "0 2 * * *", timezone: Asia/Shanghai}` | 到期时，对有待处理工作的 Scope | `schedule` |
-| `on_sources: true` | Scope 的 Source journal 超过该插件的游标 | `sources` |
+| `schedule: {interval_seconds: N}` 或 `schedule: {cron: "0 2 * * *", timezone: Asia/Shanghai}` | 到期时，对有待处理工作的 Scope | 有新 Source 时为 `sources`，否则为 `schedule` |
+| `on_sources: true` | Scope 的 Source journal 超过该插件的游标，约 2 秒内派发 | `sources` |
 | `manual: true` | 调用手动触发接口 | `manual` |
 
 - 配置了 `inputs` 的插件，每次调用都附带该 Scope 尚未消费的 Source 窗口；窗口为空时，定时和 Source 触发不调用插件，
   直接确认完成。
-- 未配置 `inputs` 的插件（例如每天整理一次已有 Artifact）不消费 Source，到期即调用；必须显式配置 `scopes`。
+- 未配置 `inputs` 的插件（例如每天整理一次已有 Artifact）不消费 Source，到期即对 `scopes` 中的每个 Scope 调用一次；
+  必须显式配置 `scopes`，第一版只支持 `interval_seconds`。
+- `cron` 只能用于配置了 `inputs` 的插件，且不能与 `on_sources` 同时使用：Supervisor 的每个 binding 只接受一种
+  interval 或 cron 策略。
 - 手动触发总是调用插件，可以附带 `params`，由插件自行解释。手动请求在接受时持久化，返回 `202 Accepted`，
-  Server 重启后仍会执行。
+  Server 重启后仍会执行。请求**不合并**：插件收到自上次成功提交以来接受的全部请求，按接受顺序排列在
+  `request.requests` 中。插件可以用它承载用户命令（例如“遗忘某条记忆”），较早的命令不会被较晚的请求覆盖。
 
 Source 插件的 `collect` 支持 `schedule` 和 `manual`（`POST /v1/scopes/{scope_id}/sources/plugins/{name}/collect`），
 添加或恢复目标时也会请求一次采集。
@@ -442,10 +446,11 @@ class GenerateRequest(BaseModel):
     scope_id: str
     reason: Literal["schedule", "sources", "manual"]
     sources: Sequence[GenerationSource]   # 本次窗口；未配置 inputs 时为空
-    params: JsonValue | None = None       # 仅手动触发
+    requests: Sequence[JsonValue] = ()    # 自上次成功提交以来接受的全部手动请求，按接受顺序
 
 class GenerationSource(BaseModel):
     ref: SourceRef                        # 精确 Source 引用
+    position: int                         # Source 在 journal 中的位置，用于按采集顺序处理
     projection: JsonValue                 # 清单 inputs.projection 指定的 Projection 内容
 
 class ArtifactWriter(ArtifactReads):
@@ -462,7 +467,7 @@ class ArtifactTransaction(ArtifactReads):
 
 - **事务外**：插件通过 `writer` 读取已提交的数据（每次读取使用独立的只读短事务），完成模型调用、向量计算等耗时工作。
 - **写事务块**：`async with writer.transaction() as tx:`。块开始时，core 开启写事务并重新校验 Supervisor 租约和调用意图；
-  块内的写操作直接在该事务中执行，立即返回真实的 `ArtifactRef`（含 revision），块内读取能看到本块已写入的内容；
+  块内的写操作直接在该事务中执行，立即返回写入后的 `ArtifactSnapshot`（含精确 revision），块内读取能看到本块已写入的内容；
   块正常结束时，core 在同一事务中以 CAS 推进游标、确认本次调用并提交；块内抛出异常、超过 `transaction_timeout_seconds`
   或提交冲突，事务整体回滚，本次调用失败。
 
@@ -480,11 +485,11 @@ class ArtifactTransaction(ArtifactReads):
 
 | 操作 | 复用的 core 实现 | 语义 |
 | --- | --- | --- |
-| `put(artifact_id, *, content, search_text=None, source_refs=(), artifact_refs=())` | `ArtifactRepository.create` / `revise` | 不存在则新建 revision 1；已存在则按当前 head 追加 revision。内容与 `search_text` 和当前 revision 相同时为 no-op，返回当前引用 |
-| `revert(artifact_id, *, to_revision, reason)` | `revise` 的回滚路径 | 以历史 revision 的内容追加新 revision，记录 `restored_from_revision` 与原因 |
-| `set_lifecycle(artifact_id, state, *, replacement_artifact_id=None)` | `ArtifactGovernanceRepository.transition` | active ↔ deprecated（可指定替代者），任意状态 → retired（不可逆）。修改 head 的治理状态，不追加 revision；被合并冻结的输入不能单独变更 |
-| `merge(inputs, *, into, content, search_text=None, source_refs=())` | 公共合并方法（[RFC #1859](1859_artifact_merge.md)） | 以 `inputs` 的当前 revision 为输入，新建 `into`，记录合并关系并冻结输入。`into` 必须是新 ID |
-| `preview_undo_merge(artifact_id)` / `undo_merge(artifact_id, *, preview=None)` | 公共合并方法的预览与恢复 | 撤销产生该 Artifact 的合并，恢复输入并退役结果；按预览执行时，相关状态变化则拒绝过期预览 |
+| `put(artifact_id, *, content, search_text=None, source_refs=(), artifact_refs=(), expected_revision=None)` | 公共合并方法的修改路径（`ArtifactRepository.create` / `revise`） | 不存在则新建 revision 1；已存在则按当前 head 追加 revision。给出 `expected_revision` 时，当前 revision 不一致即冲突，用于在事务外读取、事务内写入的乐观并发。内容与 `search_text` 和当前 revision 相同时为 no-op，返回当前快照 |
+| `revert(artifact_id, *, to_revision)` | 公共恢复方法（选定 revision） | 以历史 revision 的内容追加新 revision，记录 `restored_from_revision`；目标已被遗忘或被合并冻结时一并恢复 |
+| `set_lifecycle(artifact_id, state, *, replacement_artifact_id=None)` | 公共遗忘与恢复方法；指定替代者或退役时使用 `ArtifactGovernanceRepository.transition` | `deprecated` 为遗忘，`active` 为恢复：被合并冻结的输入会撤销冻结它的合并，按组恢复。`retired` 不可逆。修改治理状态本身不追加 revision |
+| `merge(inputs, *, into, content, search_text=None, source_refs=(), artifact_refs=())` | 公共合并方法（[RFC #1859](1859_artifact_merge.md)） | 以 `inputs` 的当前 revision 为输入，新建 `into`，记录合并关系并冻结输入。`into` 必须是新 ID；同一组输入在撤销后再次合并时，插件应把输入 revision 纳入 `stable_id`，避免与已退役的结果撞号 |
+| `preview_undo_merge(artifact_id)` / `undo_merge(artifact_id)` | 公共合并方法的预览与恢复 | 撤销产生该 Artifact 的合并，恢复输入并退役结果，返回恢复与退役的精确引用 |
 | `bind_handle(handle_key, ref)` | Artifact handle 绑定 | 把稳定 handle 绑定到指定 revision |
 | `set_tags(artifact_id, tags)` | Artifact tags 替换 | 整体替换该 Artifact 的 tags |
 
@@ -493,6 +498,8 @@ class ArtifactTransaction(ArtifactReads):
 - 只能操作本 Scope、清单 `generate.family` 中的 Artifact，插件不能指定其他 family 或 Scope。
 - `source_refs` 只能引用本次窗口中的 Source；`artifact_refs`、`to_revision` 和 `bind_handle` 的目标只能是本 family
   中实际存在的 revision。
+- core 为每个 revision 同时保存插件给出的 `search_text`，恢复旧 revision 时检索文本随内容一起恢复；公开读取只返回
+  `content`。
 - 每个写事务块的操作数、单份内容大小和总字节数有上限，超出即抛出异常并回滚，不截断、不部分提交。
 - core 不校验 `content` 的业务结构，也不保存或固化 schema。内容结构的演进由插件负责，插件可以在 `content` 中自带版本字段。
 
@@ -502,24 +509,33 @@ class ArtifactTransaction(ArtifactReads):
 范围固定为本 Scope、本 family：
 
 ```python
+class ArtifactSnapshot(BaseModel):
+    ref: ArtifactRef                      # 精确 revision
+    content: dict[str, JsonValue]
+    search_text: str | None
+    lineage: ArtifactLineage              # 直接引用的 Source 与 Artifact
+    lifecycle_state: LifecycleState       # active / deprecated / retired
+    merged_into_id: str | None            # 被合并冻结时指向合并结果
+    replacement_artifact_id: str | None
+    governance_generation: int            # 治理状态版本，用于判断读取后是否被修改
+
 class ArtifactReads(Protocol):
     async def get(self, artifact_id: str, *, revision: int | None = None) -> ArtifactSnapshot | None: ...
-    async def revisions(self, artifact_id: str, *, cursor: str | None = None, limit: int = 50) -> RevisionPage: ...
+    async def revisions(self, artifact_id: str, *, cursor: str | None = None, limit: int = 50) -> ArtifactPage: ...
     async def list(self, *, states: Collection[LifecycleState] = ("active",), tags: Collection[str] = (),
                    cursor: str | None = None, limit: int = 50) -> ArtifactPage: ...
-    async def search(self, query: str, *, states: Collection[LifecycleState] = ("active",),
-                     limit: int = 10) -> Sequence[ArtifactSnapshot]: ...
-    async def by_source(self, ref: SourceRef, *, cursor: str | None = None, limit: int = 50) -> ArtifactRefPage: ...
-    async def lineage(self, ref: ArtifactRef) -> ArtifactLineage: ...
-    async def governance(self, artifact_id: str) -> ArtifactGovernance: ...    # 生命周期、替代者、合并归属
-    async def merge_record(self, artifact_id: str) -> ArtifactMergeRecord | None: ...
-    async def tags(self, artifact_id: str) -> ArtifactTagSet: ...
+    async def search(self, query: str, *, limit: int = 10) -> Sequence[ArtifactSnapshot]: ...
+    async def by_source(self, ref: SourceRef) -> Sequence[ArtifactSnapshot]: ...
+    async def merge_inputs(self, artifact_id: str) -> Sequence[ArtifactRef]: ...
+    async def tags(self, artifact_id: str) -> Sequence[str]: ...
     async def resolve_handle(self, handle_key: str) -> ArtifactRef | None: ...
 ```
 
-- `get` 可以读当前内容或指定 revision；`revisions` 列出完整历史。
-- `list` 和 `search` 可以按生命周期状态过滤，包括 deprecated、retired 和被合并冻结的 Artifact，用于查找“之前已经存在的
-  数据”。`search` 是 core 提供的文本检索（见第 5 节），在写事务中能检索到本块已写入、尚未提交的内容。
+- 快照同时携带精确 revision、lineage 和当前治理状态，插件不需要再分别读取 lineage 和生命周期。
+- `get` 可以读当前内容或指定 revision；`revisions` 列出完整历史；`merge_inputs` 读取合并结果的精确输入。
+- `list` 可以按生命周期状态和 tags 过滤，包括 deprecated、retired 和被合并冻结的 Artifact，用于查找“之前已经存在的
+  数据”。`search` 是 core 提供的文本检索（见第 5 节），只覆盖 active 的当前 revision；在写事务中能检索到本块已写入、
+  尚未提交的内容。
 - `by_source` 反查 lineage 引用了某条 Source 的 Artifact，用于 Source 更新后找到需要修订的 Artifact。
 - 读取返回的快照都带精确 revision，可以直接作为写操作的 `artifact_refs` 或 `to_revision`。
 - 插件需要向量相似度等 core 不提供的检索时，使用自己的索引，再用 `get` 以 core 中的当前 revision 为准。
@@ -542,6 +558,9 @@ class ArtifactReads(Protocol):
    失败会让核心写入一起回滚。
 2. 写事务提交失败时，自有存储可能留下本次的条目。重试会处理同一窗口、得到同一个稳定 ID，覆盖这些条目。
 3. 从自有存储读出的结果，用 `get` 校验 core 中是否存在、revision 是否一致，忽略不一致的条目，或定期按 core 数据重建。
+
+**手动请求**：请求与窗口一样只在提交事务中被确认移除。调用失败时请求保留，下一次调用按原顺序再次收到，因此插件
+处理请求也必须幂等。一个始终导致失败的请求会持续阻塞该 Scope 的后续调用，处理方式见“未决问题”。
 
 `generate` 本身可能因失败重试而执行多次，模型调用和插件发出的外部请求不是恰好一次。
 
@@ -566,10 +585,13 @@ Worker 收到 (plugin:<name>, scope_id, request_generation)
 - 窗口内类型不匹配的 Source 被过滤，但游标仍推进过整个窗口；匹配类型的 Source 缺少所需 Projection 时调用失败，不跳过。
 - 游标只在执行器的提交事务中推进，插件得不到游标值，也没有写入接口。游标 CAS 保证在读取窗口与提交之间即使发生
   领导权变更或重复派发，同一窗口也只提交一次。
-- `on_sources` 复用现有的 `SourceProcessingPendingProvider`：journal 高水位大于游标时标记待处理，由 Supervisor 按预算派发。
-  判断基于持久化数据，Server 重启后不会丢失待处理输入。
+- 待处理工作的发现有两条路径：Server 进程中的 Source 写入会把关注该 Scope 的插件 binding 标记为待处理；启动时
+  现有的 `SourceProcessingPendingProvider` 按 journal 高水位与游标的差值补齐其他进程写入的 Source。Supervisor 只在
+  binding 的 interval 或 cron 到期时接纳待处理的 Scope，因此 `on_sources` 映射为约 2 秒的接纳间隔。判断基于持久化数据，
+  Server 重启后不会丢失待处理输入。
 - 手动触发和添加采集目标复用现有的调用意图（`ArtifactProcessingIntentRepository.request`）：在接受事务中提升
-  requested generation，多次请求合并，运行期间的新请求由后续调用处理。
+  requested generation，多次请求合并为一次调用，运行期间的新请求由后续调用处理。手动请求的参数按序保存在该 Scope 的
+  插件请求队列中，随调用提交一并移除（见第 6 节）。
 - 未配置 `scopes` 时，自动调度对所有 journal 超过游标的 Scope 生效；配置了 `scopes` 时，自动调度和手动触发都只接受
   名单内的 Scope。
 
@@ -607,6 +629,9 @@ Worker 每次调用重新导入插件代码。插件目录在 Server 运行期�
   单次调用的输入字节、写操作数和输出字节有上限，超出即失败。
 - **写事务的锁影响**：写事务块持有期间会锁住涉及的 head 和游标行；在 SQLite 上，写事务会阻塞整个数据库的其他写入。
   因此写事务块必须短，时限超出即回滚。
+- **数据库访问**：Worker 打开数据库时不创建表，Schema 由 Server 准备。现有的数据库就绪检查会校验每个待处理调用意图的
+  binding 都已持久注册；`plugin:` 前缀的 binding 由插件目录在启动时决定，就绪检查对其放行，插件移除后遗留的调用意图
+  不再被处理。
 - **失败与退避**：调用失败时不提交任何核心数据，该插件该 Scope 进入 Supervisor 现有的退避，不影响其他 Scope 和插件。
   core 不会因为重复失败自动跳过输入；持续失败需要修复插件或数据后重启。collect 中某个目标持续失败会阻塞同一 Scope
   的其他目标，可以先停用该目标。
@@ -621,8 +646,10 @@ Worker 每次调用重新导入插件代码。插件目录在 Server 运行期�
   `pc_artifact_family_schemas` 中的 schema。被合并冻结、deprecated 和 retired 的 Artifact 按公共合并与生命周期规则展示。
 - search 是 core 为插件 family 新增的通用文本检索，与现有检索接口一样只接受文本 query：写入时把 `search_text`
   经现有词法分析写入 `pc_artifact_heads.searchable_text`，检索时在该列上匹配，只返回请求 Scope 中调用者有权读取的
-  revision。未提供 `search_text` 的 Artifact 不参与检索。写入器的 `search` 使用同一实现。实现 PR 需要给出 SQLite 与
+  revision。未提供 `search_text` 的 Artifact 不参与检索。写入器的 `search` 使用同一实现。SQLite 上与 Experience、Skill
+  共用 `pc_artifact_fts`：该辅助表的重建会回填所有带检索文本的 head，就绪校验只比对内置 family 的行。实现 PR 需要给出
   OceanBase 上的检索方式和规模验证。
+- list 返回的条目只含元数据，`title` 和 `summary` 对插件 family 为空；内容需要通过 get 读取。
 - Review、Recall 和 Prepared Context 第一版不对插件 family 开放；公开的创建、修订、合并、生命周期、handle 和 tags 写接口
   也不对插件 family 开放，插件 family 的写入只来自插件。对应接口返回明确的“不支持”错误，`GET /v1/capabilities`
   反映实际支持的操作。
@@ -634,7 +661,7 @@ Worker 每次调用重新导入插件代码。插件目录在 Server 运行期�
 | `pc_sources`、Projection、Source journal、`pc_source_definition_manifests` | 保留；Source 插件的结果 |
 | `pc_artifacts`、`pc_artifact_heads`、`pc_artifact_lineage_*`、合并记录、handle、tags | 保留；Artifact 插件的结果 |
 | `pc_source_cursors` | 保留；Artifact 插件的消费游标，键为 `(scope_id, plugin:<name>)` |
-| `pc_connector_checkpoints` | 保留；各采集目标的 checkpoint，键为 `(scope_id, 目标的 binding ID)` |
+| `pc_connector_checkpoints` | 保留；各采集目标的 checkpoint，键为 `(scope_id, 目标的 binding ID)`；第一版也用一行 `(scope_id, plugin:<name>#requests)` 保存该 Scope 的手动请求队列（最多 100 条、每条最大 64 KiB），后续改为独立表 |
 | `pc_source_collect_targets` | 新增；采集目标：Scope、插件名、目标键、规范化输入、启用状态、创建与更新时间、最近成功采集时间、最近失败分类 |
 | Supervisor 的调用意图、pending、租约表 | 保留；插件 binding 与内置 binding 共用 |
 | `pc_artifact_processing_binding_states` 中为插件新增的列（`plugin_id`、`plugin_family`、`binding_generation`、`desired_state`、`phase`、`last_error`） | 移除 |
@@ -740,6 +767,12 @@ Source 与 Artifact 留在 core 的统一存储中，现有读取接口、lineag
 | 共享模型客户端 | 是否在 `PluginContext` 中提供 Server 已配置的模型客户端，让 LLM 插件不必自带凭据，并计入现有模型用量统计 |
 | 采集目标的删除 | 第一版只支持停用和恢复。是否需要彻底删除目标及其 checkpoint，以及删除后已采集 Source 的处理 |
 | 插件 family 接入 Recall / Prepared Context | 需要定义候选内容和预算约束，建议另行提案 |
+| 同步的用户命令 | 遗忘、恢复、撤销合并、编辑等用户操作目前只能作为手动请求异步执行（`202 Accepted`），调用方无法立即得到结果，也没有内置 Atomic Memory 那样的恢复预览与确认。是否增加可选的同步命令接口，由 Server 在 Worker 中执行并等待结果 |
+| 窗口大小的回退 | 内置 Atomic Memory 在模型超时时会缩小下一次的 Source 窗口。插件无法影响窗口大小，过大的窗口会持续超时。是否允许插件以约定的异常请求缩小该 Scope 的窗口 |
+| 持续失败的请求与窗口 | 始终失败的手动请求或 Source 窗口会阻塞该 Scope 的后续调用。是否提供跳过或转入死信的运维操作，以及如何记录被跳过的输入 |
+| 消费全部 Source 类型 | `inputs.source_types` 需要逐一列出类型；内置 Atomic Memory 消费所有可用于生成的 Source。是否支持 `"*"` 表示全部类型 |
+| 内置专属能力 | Scope Prompt 管理、写入闸门与决策观测、模型用量统计目前只服务内置 family，插件无法接入。是否以及如何向插件开放 |
+| 请求队列的存储 | 第一版把手动请求队列保存在 `pc_connector_checkpoints` 中以避免新增迁移；是否改为独立表，并支持查看与清理积压请求 |
 
 # 后续可能
 
