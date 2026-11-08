@@ -22,6 +22,7 @@ The queue reuses the per-Scope plugin state row in ``pc_connector_checkpoints``.
 from __future__ import annotations
 
 import json
+from typing import Any
 
 import rfc8785
 from pydantic import JsonValue
@@ -45,7 +46,7 @@ def _identity(binding_name: str, scope_id: str):
     return table.c.scope_id == scope_id, table.c.binding_id == f"{binding_name}#requests"
 
 
-async def _load(connection: AsyncConnection, binding_name: str, scope_id: str) -> dict | None:
+async def _load(connection: AsyncConnection, binding_name: str, scope_id: str) -> dict[str, Any] | None:
     payload = await connection.scalar(
         select(CONNECTOR_CHECKPOINTS_TABLE.c.checkpoint).where(*_identity(binding_name, scope_id))
     )
@@ -84,7 +85,9 @@ async def clear_requests(connection: AsyncConnection, binding_name: str, scope_i
     await _store(connection, binding_name, scope_id, {"next": state["next"], "items": remaining}, insert_row=False)
 
 
-async def _store(connection: AsyncConnection, binding_name: str, scope_id: str, queue: dict, *, insert_row: bool):
+async def _store(
+    connection: AsyncConnection, binding_name: str, scope_id: str, queue: dict[str, Any], *, insert_row: bool
+):
     payload = rfc8785.dumps(queue)
     table = CONNECTOR_CHECKPOINTS_TABLE
     if insert_row:

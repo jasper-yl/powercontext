@@ -354,15 +354,17 @@ def create_server_app(  # noqa: C901
                     records.database,
                     config.database,
                     runtime.artifact_processing_supervisor,
-                    lambda: build_worker_security(
-                        resolved,
-                        active_access_control,
-                        legacy_static_principal=static_principal if legacy_static_admin else None,
-                        enabled=True,
-                        injected=configured_access_control is not None,
-                    )
-                    if dispatch_plugins
-                    else None,
+                    lambda: (
+                        build_worker_security(
+                            resolved,
+                            active_access_control,
+                            legacy_static_principal=static_principal if legacy_static_admin else None,
+                            enabled=True,
+                            injected=configured_access_control is not None,
+                        )
+                        if dispatch_plugins
+                        else None
+                    ),
                     on_supervisor=bind_supervisor,
                     plugins_dir=resolved.plugins_dir,
                     dispatch=dispatch_plugins,

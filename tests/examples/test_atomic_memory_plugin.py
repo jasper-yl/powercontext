@@ -23,6 +23,7 @@ import asyncio
 import shutil
 import sqlite3
 from pathlib import Path
+from typing import Any
 from uuid import uuid4
 
 import pytest
@@ -52,7 +53,7 @@ def deploy(root: Path, **config) -> Path:
     return directory
 
 
-async def heads(database, scope: str) -> dict[str, dict]:
+async def heads(database, scope: str) -> dict[str, dict[str, Any]]:
     async with database.transaction() as connection:
         rows = (
             await connection.execute(
@@ -75,7 +76,7 @@ async def heads(database, scope: str) -> dict[str, dict]:
         return result
 
 
-def by_text(memories: dict[str, dict], text: str) -> tuple[str, dict]:
+def by_text(memories: dict[str, dict[str, Any]], text: str) -> tuple[str, dict[str, Any]]:
     return next((key, value) for key, value in memories.items() if value["text"] == text)
 
 

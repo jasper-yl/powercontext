@@ -28,6 +28,7 @@ import math
 import re
 import sqlite3
 from pathlib import Path
+from typing import Any
 
 DIMENSIONS = 256
 _WORD = re.compile(r"\w+", re.UNICODE)
@@ -55,7 +56,7 @@ class MemoryIndex:
     async def __aexit__(self, *_: object) -> None:
         return None
 
-    def _execute(self, statement: str, parameters: tuple = ()) -> list[tuple]:
+    def _execute(self, statement: str, parameters: tuple[object, ...] = ()) -> list[Any]:
         with sqlite3.connect(self.path, timeout=30) as connection:
             return connection.execute(statement, parameters).fetchall()
 

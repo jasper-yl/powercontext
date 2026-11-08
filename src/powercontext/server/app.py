@@ -519,6 +519,7 @@ from powercontext.http import (
     MemoryEntryAccessSelector,
     MemoryMutationResponse,
     PluginPage,
+    PluginRequestStatus,
     PluginState,
     PrepareContextRequest,
     PreparedContext,
@@ -1820,7 +1821,7 @@ async def generate_plugin_artifacts(
     http_request: Request,
 ) -> GeneratePluginArtifactsResponse:
     sequence = await _require_plugin_manager(http_request).request(scope_id, family, request.params)
-    return GeneratePluginArtifactsResponse(status="accepted", request_sequence=sequence)
+    return GeneratePluginArtifactsResponse(status=PluginRequestStatus.ACCEPTED, request_sequence=sequence)
 
 
 async def get_capabilities(request: Request) -> Capabilities:

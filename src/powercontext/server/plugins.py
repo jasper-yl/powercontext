@@ -185,12 +185,11 @@ class PluginManager:
         self._resources = AsyncExitStack()
 
     async def __aenter__(self) -> PluginManager:
-        if self.plugins_dir is None:
+        directory = self.plugins_dir
+        if directory is None:
             return self
         try:
-            entries = await asyncio.to_thread(
-                lambda: sorted(path for path in self.plugins_dir.iterdir() if path.is_dir())
-            )
+            entries = await asyncio.to_thread(lambda: sorted(path for path in directory.iterdir() if path.is_dir()))
         except OSError as error:
             log_safely(logger, logging.WARNING, f"Plugin directory unavailable ({type(error).__name__})")
             return self

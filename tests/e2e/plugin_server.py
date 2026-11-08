@@ -117,6 +117,7 @@ async def capture(client: httpx.AsyncClient, scope: str, source_id: str, content
 async def wait_for(
     read: Callable[[], Any], ready: Callable[[Any], bool], *, seconds: float = 60, log: Path | None = None
 ) -> Any:
+    value = None
     try:
         async with asyncio.timeout(seconds):
             while True:

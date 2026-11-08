@@ -1125,9 +1125,7 @@ def compose_artifact_search(contexts, embedding_model=None, *, observer=None):
             return PluginArtifactSearcher(contexts.database, family)
         return CustomArtifactSearcher(contexts.database, family, embedding_model)
 
-    artifact_search = ArtifactSearchService(
-        known_families=contexts.repositories.artifacts.families, fallback=fallback
-    )
+    artifact_search = ArtifactSearchService(known_families=contexts.repositories.artifacts.families, fallback=fallback)
     artifact_search.register(
         ExperienceArtifactSearcher(contexts.database, contexts.repositories.artifacts, contexts.experience_index)
     )

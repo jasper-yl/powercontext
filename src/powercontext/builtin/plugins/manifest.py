@@ -21,6 +21,7 @@ import inspect
 import os
 import re
 import sys
+from collections.abc import Mapping
 from datetime import timedelta
 from pathlib import Path
 from types import ModuleType
@@ -165,23 +166,23 @@ def read_manifest(directory: Path) -> PluginManifest:
     return manifest
 
 
-def resolve_environment(value: JsonValue, environ: dict[str, str] | None = None) -> JsonValue:
+def resolve_environment(value: JsonValue, environ: Mapping[str, str] | None = None) -> JsonValue:
     """Replace ``${NAME}`` references; a missing variable is a configuration error."""
 
-    environ = os.environ if environ is None else environ
+    variables: Mapping[str, str] = os.environ if environ is None else environ
     if isinstance(value, str):
 
         def substitute(match: re.Match[str]) -> str:
             name = match.group(1)
-            if name not in environ:
+            if name not in variables:
                 raise PluginConfigError(f"environment variable {name} is not set")  # noqa: TRY003
-            return environ[name]
+            return variables[name]
 
         return _REFERENCE.sub(substitute, value)
     if isinstance(value, list):
-        return [resolve_environment(item, environ) for item in value]
+        return [resolve_environment(item, variables) for item in value]
     if isinstance(value, dict):
-        return {key: resolve_environment(item, environ) for key, item in value.items()}
+        return {key: resolve_environment(item, variables) for key, item in value.items()}
     return value
 
 

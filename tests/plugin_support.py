@@ -28,6 +28,7 @@ from powercontext.builtin.plugins.executor import PluginWorkerSpec, execute_plug
 from powercontext.builtin.plugins.families import plugin_artifact_repository
 from powercontext.builtin.plugins.manifest import read_manifest
 from powercontext.builtin.plugins.requests import accept_request
+from powercontext.builtin.runtime.config import SQLiteConfig
 from powercontext.builtin.runtime.processing_contracts import ArtifactProcessingWorkAssignment
 
 
@@ -65,7 +66,10 @@ async def invoke(database, directory: Path, scope_id: str, *, requests: tuple[An
         fence=lease.fence("single-process"),
         worker_id="test-worker",
     )
-    spec = PluginWorkerSpec(database=None, directory=str(directory), manifest=manifest.model_dump(mode="json"))
+    # The executor uses the caller's open database instead of the configuration.
+    spec = PluginWorkerSpec(
+        database=SQLiteConfig(), directory=str(directory), manifest=manifest.model_dump(mode="json")
+    )
     return await execute_plugin(spec, assignment, database=database)
 
 
