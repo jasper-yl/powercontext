@@ -1116,11 +1116,17 @@ async def _open_artifact_processing_supervisor(
 
 def compose_artifact_search(contexts, embedding_model=None, *, observer=None):
     """Use the same Family-owned Searchers in Server, SDK and generation Workers."""
+    from powercontext.builtin.plugins.families import is_plugin_family
+    from powercontext.builtin.plugins.search import PluginArtifactSearcher
     from powercontext.builtin.runtime.custom_artifact_search import CustomArtifactSearcher
 
+    def fallback(family):
+        if is_plugin_family(family):
+            return PluginArtifactSearcher(contexts.database, family)
+        return CustomArtifactSearcher(contexts.database, family, embedding_model)
+
     artifact_search = ArtifactSearchService(
-        known_families=contexts.repositories.artifacts.families,
-        fallback=lambda family: CustomArtifactSearcher(contexts.database, family, embedding_model),
+        known_families=contexts.repositories.artifacts.families, fallback=fallback
     )
     artifact_search.register(
         ExperienceArtifactSearcher(contexts.database, contexts.repositories.artifacts, contexts.experience_index)

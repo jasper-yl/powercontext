@@ -223,7 +223,9 @@ def _validate_sqlite_fts(connection):
     )
     for source, helper, columns, predicate in projections:
         expected = f"SELECT {columns},COUNT(*) FROM {source}{predicate} GROUP BY {columns}"  # noqa: S608 -- Only frozen schema names and projections are interpolated.
-        actual = f"SELECT {columns},COUNT(*) FROM {helper} GROUP BY {columns}"  # noqa: S608 -- Only frozen schema names and projections are interpolated.
+        # Plugin families share pc_artifact_fts; only the built-in rows have an authoritative check here.
+        scope = predicate.replace(" AND searchable_text IS NOT NULL", "") if helper == "pc_artifact_fts" else ""
+        actual = f"SELECT {columns},COUNT(*) FROM {helper}{scope} GROUP BY {columns}"  # noqa: S608 -- Only frozen schema names and projections are interpolated.
         for left, right in ((expected, actual), (actual, expected)):
             if connection.exec_driver_sql(f"SELECT 1 FROM ({left} EXCEPT {right}) LIMIT 1").first():  # noqa: S608 -- Only frozen schema names and projections are interpolated.
                 raise MigrationError(
@@ -238,5 +240,6 @@ def _validate_intent_bindings(connection):
         ).scalar_one()
     )
     for (binding,) in connection.exec_driver_sql("SELECT DISTINCT binding_name FROM pc_artifact_processing_intents"):
-        if binding not in manifest["bindings"]:
+        # Directory-loaded plugins own "plugin:" bindings without durable registration.
+        if binding not in manifest["bindings"] and not binding.startswith("plugin:"):
             raise MigrationError("unsupported_task_format", "A pending Processing intent has no registered binding.")

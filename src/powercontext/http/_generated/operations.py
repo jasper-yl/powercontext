@@ -82,6 +82,8 @@ from powercontext.http._generated.models import (
     FlushTopicMemoryResponse,
     GeneratedCandidateResponse,
     GenerateExperienceRequest,
+    GeneratePluginArtifactsRequest,
+    GeneratePluginArtifactsResponse,
     GeneratePromptDemonstrationsRequest,
     GenerateSkillRequest,
     GetCandidateRequest,
@@ -129,6 +131,8 @@ from powercontext.http._generated.models import (
     MemoryCapacity,
     MemoryMutationResponse,
     MergeAtomicMemoryRequest,
+    PluginPage,
+    PluginState,
     PrepareContextRequest,
     PreparedContext,
     PreparedHandoff,
@@ -1700,6 +1704,75 @@ FLUSH_TOPIC_MEMORY = Operation[FlushTopicMemoryRequest, FlushTopicMemoryResponse
         422: {"$ref": "#/components/responses/InvalidRequest"},
         503: {"$ref": "#/components/responses/Unavailable"},
         500: {"$ref": "#/components/responses/InternalError"},
+    },
+    access=AccessRequirement(
+        action="scope.contribute", resource="scope", scope_id_field="scope_id", resolver="request"
+    ),
+)
+
+LIST_PLUGINS = Operation[None, PluginPage](
+    method="GET",
+    path="/v1/plugins",
+    operation_id="list_plugins",
+    request_type=None,
+    request_location=None,
+    path_parameters=(),
+    response_type=PluginPage,
+    success_status=200,
+    summary="List loaded plugins",
+    tags=("plugins",),
+    scope_mode="none",
+    responses={
+        200: {"description": "Plugins found in the plugin directory at startup."},
+        401: {"$ref": "#/components/responses/Unauthorized"},
+        403: {"$ref": "#/components/responses/Forbidden"},
+        503: {"$ref": "#/components/responses/Unavailable"},
+    },
+    access=AccessRequirement(action="server.admin", resource="server", scope_id_field=None, resolver="static"),
+)
+
+GET_PLUGIN = Operation[None, PluginState](
+    method="GET",
+    path="/v1/plugins/{name}",
+    operation_id="get_plugin",
+    request_type=None,
+    request_location=None,
+    path_parameters=("name",),
+    response_type=PluginState,
+    success_status=200,
+    summary="Get one loaded plugin",
+    tags=("plugins",),
+    scope_mode="none",
+    responses={
+        200: {"description": "The plugin's startup check result, without configuration values."},
+        401: {"$ref": "#/components/responses/Unauthorized"},
+        403: {"$ref": "#/components/responses/Forbidden"},
+        404: {"$ref": "#/components/responses/NotFound"},
+        503: {"$ref": "#/components/responses/Unavailable"},
+    },
+    access=AccessRequirement(action="server.admin", resource="server", scope_id_field=None, resolver="static"),
+)
+
+GENERATE_PLUGIN_ARTIFACTS = Operation[GeneratePluginArtifactsRequest, GeneratePluginArtifactsResponse](
+    method="POST",
+    path="/v1/scopes/{scope_id}/artifacts/{family}/generate",
+    operation_id="generate_plugin_artifacts",
+    request_type=GeneratePluginArtifactsRequest,
+    request_location="body",
+    path_parameters=("scope_id", "family"),
+    response_type=GeneratePluginArtifactsResponse,
+    success_status=202,
+    summary="Request generation by an Artifact plugin",
+    tags=("plugins",),
+    scope_mode="current",
+    responses={
+        202: {"description": "The request is durable and an invocation is accepted."},
+        401: {"$ref": "#/components/responses/Unauthorized"},
+        403: {"$ref": "#/components/responses/Forbidden"},
+        404: {"$ref": "#/components/responses/NotFound"},
+        409: {"$ref": "#/components/responses/Conflict"},
+        422: {"$ref": "#/components/responses/InvalidRequest"},
+        503: {"$ref": "#/components/responses/Unavailable"},
     },
     access=AccessRequirement(
         action="scope.contribute", resource="scope", scope_id_field="scope_id", resolver="request"

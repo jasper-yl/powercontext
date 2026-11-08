@@ -134,7 +134,9 @@ def _validate_intent_bindings(connection):
         ).scalar_one()
     )
     for (binding,) in connection.exec_driver_sql("SELECT DISTINCT binding_name FROM pc_artifact_processing_intents"):
-        if binding in manifest["bindings"]:
+        # Directory-loaded plugins own "plugin:" bindings without durable registration;
+        # intents left by a removed plugin stay inert until it is deployed again.
+        if binding in manifest["bindings"] or binding.startswith("plugin:"):
             continue
         registration = connection.execute(
             text(

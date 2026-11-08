@@ -715,6 +715,70 @@ class ChangeArtifactPluginStateRequest(BaseModel):
     expected_generation: Annotated[StrictInt, Field(ge=1)]
 
 
+class PluginKind(StrEnum):
+    ARTIFACT = "artifact"
+
+
+class PluginLoadStatus(StrEnum):
+    LOADED = "loaded"
+    FAILED = "failed"
+
+
+class PluginTrigger(StrEnum):
+    SCHEDULE = "schedule"
+    SOURCES = "sources"
+    MANUAL = "manual"
+
+
+class PluginCallOutcome(StrEnum):
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+
+
+class PluginRequestStatus(StrEnum):
+    ACCEPTED = "accepted"
+
+
+class PluginState(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+    )
+    name: StrictStr
+    kind: PluginKind
+    status: PluginLoadStatus
+    error: Annotated[StrictStr | None, Field(description="Safe failure category from the startup check.")]
+    family: Annotated[StrictStr | None, Field(...)]
+    binding_name: Annotated[StrictStr | None, Field(...)]
+    scopes: Annotated[list[StrictStr] | None, Field(...)]
+    triggers: list[PluginTrigger]
+    last_outcome: Annotated[PluginCallOutcome | None, Field(description="Latest call since process start.")]
+    last_finished_at: Annotated[AwareDatetime | None, Field(...)]
+
+
+class PluginPage(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+    )
+    items: list[PluginState]
+
+
+class GeneratePluginArtifactsRequest(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+    )
+    params: Annotated[
+        Any | None, Field(description="Plugin-defined request value delivered unchanged to the plugin.")
+    ] = None
+
+
+class GeneratePluginArtifactsResponse(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+    )
+    status: PluginRequestStatus
+    request_sequence: Annotated[StrictInt, Field(ge=1)]
+
+
 class DesiredState(StrEnum):
     ENABLED = "enabled"
     DISABLED = "disabled"

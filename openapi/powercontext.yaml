@@ -2025,6 +2025,73 @@ paths:
           $ref: "#/components/responses/Unavailable"
         "500":
           $ref: "#/components/responses/InternalError"
+  /v1/plugins:
+    get:
+      tags: [plugins]
+      summary: List loaded plugins
+      description: >-
+        Lists the plugins checked at Server startup, whether each loaded or failed, and the calls made since the
+        process started. Plugins have no persisted lifecycle state; change the plugin directory and restart Server.
+      operationId: list_plugins
+      x-powercontext-access: {action: server.admin, resource: {type: server}}
+      responses:
+        "200":
+          description: Plugins found in the plugin directory at startup.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PluginPage'}
+        "401": {$ref: '#/components/responses/Unauthorized'}
+        "403": {$ref: '#/components/responses/Forbidden'}
+        "503": {$ref: '#/components/responses/Unavailable'}
+  /v1/plugins/{name}:
+    get:
+      tags: [plugins]
+      summary: Get one loaded plugin
+      operationId: get_plugin
+      x-powercontext-access: {action: server.admin, resource: {type: server}}
+      parameters:
+        - {name: name, in: path, required: true, schema: {type: string, minLength: 1, maxLength: 64, pattern: '^[a-z][a-z0-9-]*$'}}
+      responses:
+        "200":
+          description: The plugin's startup check result, without configuration values.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PluginState'}
+        "401": {$ref: '#/components/responses/Unauthorized'}
+        "403": {$ref: '#/components/responses/Forbidden'}
+        "404": {$ref: '#/components/responses/NotFound'}
+        "503": {$ref: '#/components/responses/Unavailable'}
+  /v1/scopes/{scope_id}/artifacts/{family}/generate:
+    post:
+      tags: [plugins]
+      summary: Request generation by an Artifact plugin
+      description: >-
+        Persists the request and returns before the plugin runs. The plugin receives every request accepted since its
+        last committed invocation, in order, together with any unconsumed Sources. Only plugin families that allow manual
+        triggers accept requests.
+      operationId: generate_plugin_artifacts
+      x-powercontext-access: {action: scope.contribute, resource: {type: scope, scope-id-from: scope_id}}
+      x-powercontext-scope-mode: current
+      parameters:
+        - {name: scope_id, in: path, required: true, schema: {type: string, minLength: 1, maxLength: 256, pattern: '.*\S.*'}}
+        - {name: family, in: path, required: true, schema: {type: string, minLength: 1, maxLength: 128, pattern: '^[a-z][a-z0-9-]*$'}}
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: {$ref: '#/components/schemas/GeneratePluginArtifactsRequest'}
+      responses:
+        "202":
+          description: The request is durable and an invocation is accepted.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/GeneratePluginArtifactsResponse'}
+        "401": {$ref: '#/components/responses/Unauthorized'}
+        "403": {$ref: '#/components/responses/Forbidden'}
+        "404": {$ref: '#/components/responses/NotFound'}
+        "409": {$ref: '#/components/responses/Conflict'}
+        "422": {$ref: '#/components/responses/InvalidRequest'}
+        "503": {$ref: '#/components/responses/Unavailable'}
   /v1/scopes/{scope_id}/artifacts/{family}/search:
     post:
       tags: [artifacts]
@@ -7948,6 +8015,49 @@ components:
       required: [expected_generation]
       properties:
         expected_generation: {type: integer, minimum: 1}
+    PluginKind: {type: string, enum: [artifact]}
+    PluginLoadStatus: {type: string, enum: [loaded, failed]}
+    PluginTrigger: {type: string, enum: [schedule, sources, manual]}
+    PluginCallOutcome: {type: string, enum: [succeeded, failed]}
+    PluginRequestStatus: {type: string, enum: [accepted]}
+    PluginState:
+      type: object
+      additionalProperties: false
+      required: [name, kind, status, error, family, binding_name, scopes, triggers, last_outcome, last_finished_at]
+      properties:
+        name: {type: string}
+        kind: {$ref: '#/components/schemas/PluginKind'}
+        status: {$ref: '#/components/schemas/PluginLoadStatus'}
+        error: {type: string, nullable: true, description: Safe failure category from the startup check.}
+        family: {type: string, nullable: true}
+        binding_name: {type: string, nullable: true}
+        scopes: {type: array, nullable: true, items: {type: string}}
+        triggers: {type: array, items: {$ref: '#/components/schemas/PluginTrigger'}}
+        last_outcome:
+          description: Latest call since process start.
+          nullable: true
+          allOf: [{$ref: '#/components/schemas/PluginCallOutcome'}]
+        last_finished_at: {type: string, format: date-time, nullable: true}
+    PluginPage:
+      type: object
+      additionalProperties: false
+      required: [items]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/PluginState'}}
+    GeneratePluginArtifactsRequest:
+      type: object
+      additionalProperties: false
+      properties:
+        params:
+          description: Plugin-defined request value delivered unchanged to the plugin.
+          nullable: true
+    GeneratePluginArtifactsResponse:
+      type: object
+      additionalProperties: false
+      required: [status, request_sequence]
+      properties:
+        status: {$ref: '#/components/schemas/PluginRequestStatus'}
+        request_sequence: {type: integer, minimum: 1}
     ArtifactPluginState:
       type: object
       additionalProperties: false
