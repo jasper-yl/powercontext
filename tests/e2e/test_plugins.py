@@ -94,3 +94,49 @@ def test_server_loads_plugins_dispatches_on_sources_and_serves_reads(tmp_path):
             assert rejected.status_code in {404, 405, 422}, rejected.text
 
     asyncio.run(scenario())
+
+
+def test_atomic_memory_plugin_runs_end_to_end_through_the_server(tmp_path):
+    from tests.examples.test_atomic_memory_plugin import FAMILY, deploy
+
+    plugins = tmp_path / "plugins"
+    deploy(plugins)
+
+    async def text(client, scope, artifact_id):
+        response = await client.get(f"/v1/scopes/{scope}/artifacts/{FAMILY}/{artifact_id}")
+        assert response.status_code == 200, response.text
+        return response.json()["content"]["text"]
+
+    async def scenario():
+        async with running_server(tmp_path, plugins) as client:
+            scope = await create_scope(client, "atomic-memory-plugin-e2e")
+            await capture(client, scope, "a", "create|region|deploys go to east")
+            await capture(client, scope, "b", "create|zone|primary zone is east-1")
+            log = tmp_path / "server.log"
+            memories = await wait_for(lambda: items(client, scope, FAMILY), lambda value: len(value) == 2, log=log)
+            await capture(client, scope, "c", "update|region|deploys go to north")
+
+            async def region_text():
+                for item in await items(client, scope, FAMILY):
+                    value = await text(client, scope, item["artifact_id"])
+                    if value.startswith("region"):
+                        return value
+                return None
+
+            await wait_for(region_text, lambda value: value == "region: deploys go to north", log=log)
+            zone = None
+            for item in memories:
+                if (await text(client, scope, item["artifact_id"])).startswith("zone"):
+                    zone = item["artifact_id"]
+            response = await client.post(
+                f"/v1/scopes/{scope}/artifacts/{FAMILY}/generate", json={"params": {"op": "forget", "id": zone}}
+            )
+            assert response.status_code == 202, response.text
+
+            async def search_zone():
+                found = await client.post(f"/v1/scopes/{scope}/artifacts/{FAMILY}/search", json={"query": "zone"})
+                return [item["content"]["text"] for item in found.json()["results"]]
+
+            await wait_for(search_zone, lambda value: value == [], log=log)
+
+    asyncio.run(scenario())

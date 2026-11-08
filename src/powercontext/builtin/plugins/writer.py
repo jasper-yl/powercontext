@@ -383,7 +383,8 @@ class PluginArtifactTransaction(_Reads):
                 expected_state_version=current.state.governance_generation,
             )
             return await self._commit(plan)
-        if requested is ArtifactLifecycleState.ACTIVE and current.state.merged_into_id is None:
+        if requested is ArtifactLifecycleState.ACTIVE:
+            # Shared restoration also undoes the merges that froze an input, as one group.
             plan = await owner.service.inspect_restore(
                 self._connection, owner.scope_id, artifact_id, None, operation="restore"
             )
@@ -397,17 +398,8 @@ class PluginArtifactTransaction(_Reads):
             requested,
             replacement_artifact_id,
         )
-        if requested is ArtifactLifecycleState.ACTIVE:
-            await publish_search_text(
-                self._connection,
-                owner.scope_id,
-                owner.family,
-                artifact_id,
-                current.artifact.revision,
-                current.artifact.content.search_text,
-            )
-        else:
-            await publish_search_text(self._connection, owner.scope_id, owner.family, artifact_id, None, None)
+        # Only deprecation with a replacement and retirement reach here; both leave search.
+        await publish_search_text(self._connection, owner.scope_id, owner.family, artifact_id, None, None)
         return _snapshot(await self._require(artifact_id))
 
     async def merge(
