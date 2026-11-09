@@ -37,7 +37,7 @@ from powercontext.builtin.plugins.search import PluginArtifactSearcher, PluginAr
 from powercontext.builtin.runtime.composition import open_builtin_contexts
 from powercontext.builtin.runtime.config import BuiltinConfig, SQLiteConfig
 from powercontext.builtin.scope import ScopeDraft
-from tests.plugin_support import change, current, invoke
+from tests.plugin_support import current, edit, governance, invoke
 
 EXAMPLE = Path(__file__).resolve().parents[2] / "examples/plugins/atomic_memory"
 FAMILY = "atomic-memory-plugin"
@@ -164,7 +164,7 @@ def test_merge_freezes_inputs_and_undo_restores_them(tmp_path, config, settings)
             assert region["merged_into"] == merged_id and zone["merged_into"] == merged_id
             assert set(await searchable(contexts, scope, "east")) == {"region zone: region east and zone east-1"}
 
-            await change(database, directory, scope, lambda tx: tx.undo_merge(merged_id))
+            await governance(database, directory, scope).restore(merged_id, operation="undo_merge")
             memories = await heads(database, scope)
             assert memories[merged_id]["state"] == "retired"
             assert memories[region_id]["merged_into"] is None and memories[region_id]["state"] == "active"
@@ -179,7 +179,7 @@ def test_merge_freezes_inputs_and_undo_restores_them(tmp_path, config, settings)
             await invoke(database, directory, scope)
             again = await heads(database, scope)
             second_id, _ = by_text(again, "region zone: combined east placement")
-            await change(database, directory, scope, lambda tx: tx.set_lifecycle(region_id, "active"))
+            await governance(database, directory, scope).restore(region_id)
             restored = await heads(database, scope)
             assert restored[second_id]["state"] == "retired"
             assert restored[region_id]["merged_into"] is None
@@ -200,17 +200,26 @@ def test_user_changes_edit_forget_and_restore_without_the_plugin(tmp_path, confi
             ((pref_id, pref),) = (await heads(database, scope)).items()
 
             edited = {**pref["content"], "text": "pref: prefers concise answers with code"}
-            await change(database, directory, scope, lambda tx: tx.put(pref_id, content=edited, expected_revision=1))
+            await edit(database, directory, scope, pref_id, edited, expected_revision=1)
             memories = await heads(database, scope)
             assert memories[pref_id]["text"] == "pref: prefers concise answers with code"
             assert memories[pref_id]["revision"] == 2
+            # Like built-in edits, the submitted content is kept as the revision's own lineage Source.
+            (edit_source,) = memories[pref_id]["lineage"].sources
+            assert edit_source.source_type == "content"
             assert await searchable(contexts, scope, "code") == ["pref: prefers concise answers with code"]
 
-            await change(database, directory, scope, lambda tx: tx.set_lifecycle(pref_id, "deprecated"))
+            changes = governance(database, directory, scope)
+            current = await changes.get(pref_id)
+            await changes.forget(
+                pref_id,
+                expected_revision=current.artifact.revision,
+                expected_state_version=current.state.governance_generation,
+            )
             assert (await heads(database, scope))[pref_id]["state"] == "deprecated"
             assert await searchable(contexts, scope, "concise") == []
 
-            await change(database, directory, scope, lambda tx: tx.set_lifecycle(pref_id, "active"))
+            await changes.restore(pref_id)
             restored = (await heads(database, scope))[pref_id]
             # Shared restoration records the restore as a new revision with the same content.
             assert restored["state"] == "active" and restored["revision"] == 3

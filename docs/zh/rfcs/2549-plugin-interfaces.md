@@ -115,7 +115,7 @@ flowchart LR
 | 提交一条 Source | 现有 Source 写入接口 | core 调用插件定义的 `resolve` 和 Projection 完成校验与转换 |
 | 添加、查看、停用采集目标 | 现有 Source 管理接口 | core 调用插件的 `identify_target` 规范化输入 |
 | 浏览、读取、检索 Artifact | 现有 Artifact 读取与检索接口 | 不参与 |
-| 编辑、遗忘、恢复、撤销合并 | 现有 Artifact 写接口与通用生命周期接口 | 不参与；插件在下一次调用时看到新状态 |
+| 编辑、打 tag、合并、遗忘、恢复、撤销合并 | 现有 Artifact 写接口、tags 接口与通用合并接口 | 不参与；插件在下一次调用时看到新状态 |
 
 职责划分：
 
@@ -340,8 +340,8 @@ plugin = ArtifactPlugin(
 
 ### 4.4 调用方怎么使用
 
-调用方使用现有的 Artifact 接口访问插件 family。读取接口直接读 `pc_artifacts`，写接口由 core 通过与插件相同的写入器执行，
-都不运行插件代码：
+调用方使用现有的 Artifact 接口访问插件 family。读取接口直接读 `pc_artifacts`，写接口由 core 执行，与插件写入复用同一套
+core 实现，都不运行插件代码：
 
 | 用途 | 接口 |
 | --- | --- |
@@ -349,8 +349,11 @@ plugin = ArtifactPlugin(
 | 读取当前内容、指定 revision、revision 历史、tags | `GET .../{artifact_id}`、`GET .../{artifact_id}/revisions/{revision}`、`GET .../{artifact_id}/revisions`、`GET .../{artifact_id}/tags` |
 | 文本检索 | `POST /v1/scopes/{scope_id}/artifacts/{family}/search` |
 | 编辑（提交完整内容，`If-Match` 校验当前 revision） | `PUT /v1/scopes/{scope_id}/artifacts/{family}/{artifact_id}` |
-| 遗忘、退役、恢复 | `POST .../{artifact_id}/lifecycle`，`state` 为 `deprecated`、`retired` 或 `active` |
-| 撤销合并 | `POST .../{artifact_id}/undo-merge` |
+| 修改 tags | `PUT .../{artifact_id}/tags`；按 tag 查询用 `POST /v1/scopes/{scope_id}/artifact-tags/query` |
+| 读取治理状态（遗忘、合并前取得 `state_version`） | `GET .../{artifact_id}/governance` |
+| 合并 | `POST /v1/scopes/{scope_id}/artifacts/{family}/merges` |
+| 遗忘 | `POST .../{artifact_id}/forget` |
+| 恢复、恢复到旧 revision、撤销合并 | `POST .../{artifact_id}/restorations` |
 | 补充知识 | 写入一条 Source，由插件在下一次调用中处理 |
 
 修改同步返回结果。插件在下一次调用中通过写入器读到修改后的状态。
@@ -628,21 +631,45 @@ class ArtifactReads(Protocol):
 
 ## 4. 用户对插件 Artifact 的修改
 
-用户修改通过 core 的通用 Artifact 接口完成，由 Server 用与插件相同的写入器在一个短事务中执行，不调用插件，也不进入 Supervisor：
+用户修改通过 core 的通用 Artifact 接口完成，由 Server 在短事务中同步执行，不调用插件，也不进入 Supervisor。
 
-| 接口 | 写操作 | 规则 |
-| --- | --- | --- |
-| `PUT /v1/scopes/{scope_id}/artifacts/{family}/{artifact_id}` | `put(..., expected_revision=If-Match)` | 请求体为 `{"content": {...}}`，content 按原样保存；`If-Match` 与当前 revision 不一致返回 412；Artifact 必须已存在 |
-| `POST .../{artifact_id}/lifecycle` | `set_lifecycle` | `state` 为 `deprecated`、`retired` 或 `active`，可附 `replacement_artifact_id` |
-| `POST .../{artifact_id}/undo-merge` | `undo_merge` | 返回恢复与退役的精确引用 |
+**编辑与 tags**
 
-- **权限**：与内置 family 的 Artifact 写入相同，需要该 Artifact 的写权限（`artifact.write`）。
+| 接口 | 规则 |
+| --- | --- |
+| `PUT /v1/scopes/{scope_id}/artifacts/{family}/{artifact_id}` | 请求体为 `{"content": {...}}`，content 按原样保存，检索文本按声明的 `search_fields` 提取；`If-Match` 与当前 revision 不一致返回 412；Artifact 必须已存在。与内置 family 的编辑一样，提交的内容另存为一条内部 Content Source（`lineage_only`），作为新 revision 的直接来源记入 lineage；这类 Source 不进入任何插件的输入窗口 |
+| `GET` / `PUT .../{artifact_id}/tags`、`POST /v1/scopes/{scope_id}/artifact-tags/query` | 与内置 family 相同；tags 不产生新的内容 revision |
+
+**合并、遗忘与恢复**
+
+这几项能力由共享的合并引擎提供（`ArtifactMergeService`，[RFC #1859](1859_artifact_merge.md)）。引擎本来就按 family 无关的方式
+设计：每个 family 提供一个适配器，负责生成合并后的内容和维护自己的索引；版本校验、级联恢复、lineage 记录和权限检查都在
+引擎中完成。运行时用一个注册表（`ArtifactMergeApplication`）按 family 名找到对应的引擎实例。内置 family 目前登记了
+Experience 和 Atomic Memory；Server 加载插件时，为每个插件 family 创建一个引擎实例（插件适配器 + 共享的 Artifact 访问策略）
+并登记进去。
+
+在注册表之上提供一组不区分 family 的接口，对所有登记过的 family 生效；没有登记的 family 返回 422：
+
+| 接口 | 规则 |
+| --- | --- |
+| `GET .../{artifact_id}/governance` | 返回当前 revision、生命周期状态、`state_version` 和合并目标 |
+| `POST /v1/scopes/{scope_id}/artifacts/{family}/merges` | 输入为至少两个当前 Artifact 的 `artifact_id`、`revision`、`state_version`，以及结果的完整内容；新建结果 Artifact 并冻结所有输入。任何输入已变化即返回 409 |
+| `POST .../{artifact_id}/forget` | 携带 `revision` 和 `state_version`；把 Artifact 标为 deprecated（无替代者），不追加 revision，退出检索 |
+| `POST .../{artifact_id}/restorations` | `operation` 为 `restore`（默认，可指定 `revision` 恢复到旧内容）或 `undo_merge`；按组执行级联恢复和退役 |
+
+- **权限**：由引擎检查，与内置 family 相同：修改已有 Artifact 需要该 Artifact 的写权限（`artifact.write`），新建合并结果
+  需要 Scope 的贡献权限，结果归属于调用者。
+  插件调用中的写入器使用同一个引擎类和适配器，只是权限不同：插件对本 family 的 Artifact 有完整写权限，包括用户合并
+  产生的结果。
+- **不提供预览**：Atomic Memory 的专用接口支持先预览恢复影响、再凭签名 token 执行。通用接口不提供预览，也就不需要签名
+  密钥；恢复和撤销合并按执行时的当前状态进行，合并和遗忘依靠 `revision` 与 `state_version` 校验。
+- **合并内容**：插件 family 的合并内容是不透明 JSON，core 只校验 JSON 结构并按 `search_fields` 提取检索文本；内置 family
+  按各自的内容模型校验。
 - **并发**：用户修改与插件调用可能同时发生。插件在事务外读取、事务内用 `expected_revision` 写入时会发现冲突并整体回滚，
   下一次调用基于修改后的状态重新决策；用户修改不会被插件静默覆盖。
-- **不开放的操作**：公开接口不为插件 family 新建 Artifact 或执行合并。Artifact 的身份和合并决策属于插件；调用方要补充
-  知识，就写入 Source。
-- `lifecycle` 和 `undo-merge` 是不区分 family 的通用接口，第一版只接受插件 family；内置 family 继续使用各自的生命周期
-  和恢复接口。
+- **不通知插件**：与内置 family 一样，用户修改只记录在 lineage 和治理状态中，不通知插件。插件在下一次调用时通过写入器
+  读到新状态。
+- **新建**：公开接口不为插件 family 直接新建 Artifact（合并结果除外）。调用方要补充知识，就写入 Source。
 
 ## 5. 插件执行器与消费游标
 
@@ -759,8 +786,9 @@ Server 停止
 | 移除 | 自定义 family 的声明式索引（`ArtifactSearchDeclaration`、`TextIndex` 等）、`ArtifactFamily` 的 schema 声明、`ArtifactDraft` 和旧的 Worker 插件执行器 |
 | 新增 | `powercontext.plugins`：`SourcePlugin`、`ArtifactPlugin`、`Inputs`、`Interval`、`Cron`、`PluginContext`、写入器与读取接口 |
 | 新增 | `GET /v1/plugins`、`GET /v1/plugins/{name}`、`GET /v1/plugins/{name}/scopes`（`server.admin`，只读） |
-| 新增 | `POST /v1/scopes/{scope_id}/artifacts/{family}/{artifact_id}/lifecycle`、`POST .../{artifact_id}/undo-merge`（通用接口，第一版只接受插件 family） |
+| 新增 | `GET .../{artifact_id}/governance`、`POST /v1/scopes/{scope_id}/artifacts/{family}/merges`、`POST .../{artifact_id}/forget`、`POST .../{artifact_id}/restorations`：基于共享合并引擎注册表的通用接口，对所有登记过的 family 生效（内置为 Experience 和 Atomic Memory，以及加载的插件 family）。Atomic Memory 的专用接口保持不变 |
 | 调整 | `PUT /v1/scopes/{scope_id}/artifacts/{family}/{artifact_id}` 接受插件 family，请求体为 `{"content": {...}}` |
+| 调整 | tags 接口接受插件 family：`TaggableArtifactFamily` 从枚举改为与 `ArtifactReadFamily` 相同格式的字符串，服务端校验为内置 family 或已加载的插件 family。网络上的数据格式不变，生成的客户端少了这个枚举类型 |
 | 调整 | 通用 Artifact 读取与检索接口支持插件 family；`GET /v1/capabilities` 列出插件 family |
 | 调整 | `pc_source_add` 的 write 用法使用插件定义，collect 用法添加采集目标；`pc_source_capabilities` 列出插件 Source 类型与目标输入；`pc_source_status` 报告目标及其最近采集结果；`pc_source_target_set_enabled` 作用于 core 保存的目标 |
 | 调整 | 环境变量 `POWERCONTEXT_SERVER_PLUGINS_DIR` 取代 `POWERCONTEXT_SERVER_ARTIFACT_PLUGINS_DIR` 和 Source 插件目录配置 |
@@ -791,7 +819,7 @@ Server 停止
   不经过 Worker。它们应当是纯数据转换，但阻塞或异常仍会影响请求处理。Server 对这些调用设置超时并把异常转换为请求错误。
 - **写事务持锁**：写事务块期间持有数据库锁，SQLite 上会阻塞其他写入。插件若在块内执行慢操作，会拖慢整个 Server 的写入，
   直到块超时回滚。
-- **插件自有存储与核心数据不保证一致**：两者不在同一事务中，提交失败可能在自有存储中留下条目；用户修改也不会通知插件。
+- **插件自有存储与核心数据不保证一致**：两者不在同一事务中，提交失败可能在自有存储中留下条目；用户修改也不通知插件。
   插件需要按稳定 ID 覆盖，并以 core 的当前数据为准。
 - **每次调用都要启动 Worker 并加载插件**：子进程启动和工厂初始化有固定开销，不适合秒级高频调用；插件不能在调用之间
   复用连接或缓存。
@@ -818,6 +846,7 @@ Server 停止
 | `generate` 内的短写事务块（本提案） | 耗时工作在块外；块内直接复用 core 的写操作和校验，拿到真实 revision，读取能看到本块写入；块结束时与游标、确认一起提交，异常即回滚。代价是块内持锁，需要时限约束 |
 | 用户命令经插件执行（手动请求排队，插件在下一次调用中处理） | 插件要实现命令解析，调用方只能异步等待；一个始终失败的命令会阻塞该 Scope 的后续生成；还需要持久化请求队列。遗忘、恢复、编辑都是 core 已有的通用操作，由 core 同步执行更简单 |
 | 插件专用的触发与管理接口 | 调用方要区分插件与内置能力；现有的 Source 与 Artifact 接口已经覆盖调用方需要的操作 |
+| 通用合并接口只对插件 family 开放 | 需要在接口里额外维护一份 family 白名单。能操作哪些 family 本来就由注册表决定，没有适配器的 family 无法登记；内置 family 的权限检查在引擎内，两个入口走同一套检查 |
 | 常驻插件进程（类似 Dify 的插件守护进程） | 可以复用连接、支持多语言，但需要进程管理、序列化协议和取消协议。接口以请求 / 响应模型定义，后续可以替换执行方式而不改插件代码 |
 | 支持热加载 | 需要重新引入加载状态、注册代次屏蔽和旧调用回收，与目标冲突 |
 
@@ -858,10 +887,7 @@ Server 停止
 | 持续失败的窗口 | 始终失败的 Source 窗口会阻塞该 Scope 的后续调用。是否提供跳过或转入死信的运维操作，以及如何记录被跳过的输入 |
 | 消费全部 Source 类型 | `inputs.source_types` 需要逐一列出类型；内置 Atomic Memory 消费所有可用于生成的 Source。是否支持 `"*"` 表示全部类型 |
 | 内置专属能力 | Scope Prompt 管理、写入闸门与决策观测、模型用量统计目前只服务内置 family，插件无法接入。是否以及如何向插件开放 |
-| 用户修改的通知 | 用户修改不调用插件，插件的自有索引只能在读取时以 core 为准或定期重建。是否需要把用户修改作为一种触发交给插件，让它及时更新自有存储 |
-| 用户修改的授权粒度 | `artifact.write` 按 Artifact 归属授权，插件写入的 Artifact 归属于执行插件的 Worker 身份。普通 Scope 成员能否修改插件 Artifact，是否应改为按 Scope 的贡献权限授权 |
-| 插件 family 的 tags 写入 | 插件可以通过写入器写 tags；公开的 `PUT .../tags` 是否同样接受插件 family |
-| 通用生命周期接口覆盖内置 family | `lifecycle` 与 `undo-merge` 第一版只接受插件 family。内置 family 是否迁移到这两个通用接口，统一调用方的用法 |
+| Atomic Memory 专用接口的去留 | 通用合并接口上线后，Atomic Memory 的合并、遗忘、恢复同时有专用和通用两个入口，行为一致。专用接口是否保留，或改为通用接口的别名 |
 
 # 后续可能
 

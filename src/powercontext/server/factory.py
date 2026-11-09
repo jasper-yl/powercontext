@@ -367,6 +367,7 @@ def create_server_app(  # noqa: C901
                     ),
                     on_supervisor=bind_supervisor,
                     plugins_dir=resolved.plugins_dir,
+                    register_merge=None if runtime.artifact_merge is None else runtime.artifact_merge.register,
                     dispatch=dispatch_plugins,
                 )
             )

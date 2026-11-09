@@ -133,7 +133,7 @@ Callers deal only with core's existing APIs:
 | Submit a Source | Existing Source write API | Core calls the plugin's `resolve` and Projections to validate and convert it |
 | Add, view, or disable a collection target | Existing Source management APIs | Core calls the plugin's `identify_target` to normalize the input |
 | Browse, read, or search Artifacts | Existing Artifact read and search APIs | Not involved |
-| Edit, forget, restore, undo a merge | Existing Artifact write API and the generic lifecycle APIs | Not involved; the plugin sees the new state in its next invocation |
+| Edit, tag, merge, forget, restore, undo a merge | Existing Artifact write API, tag APIs, and the generic merge APIs | Not involved; the plugin sees the new state in its next invocation |
 
 Responsibilities:
 
@@ -367,7 +367,7 @@ left by the previous attempt, and reads from the owned index defer to core's cur
 ### 4.4 How callers use it
 
 Callers access plugin families through the existing Artifact APIs. Read APIs read `pc_artifacts` directly, and write APIs
-are executed by core through the same writer plugins use; neither runs plugin code:
+are executed by core with the same core implementation plugin writes use; neither runs plugin code:
 
 | Purpose | API |
 | --- | --- |
@@ -375,8 +375,11 @@ are executed by core through the same writer plugins use; neither runs plugin co
 | Read the current content, a given revision, revision history, tags | `GET .../{artifact_id}`, `GET .../{artifact_id}/revisions/{revision}`, `GET .../{artifact_id}/revisions`, `GET .../{artifact_id}/tags` |
 | Text search | `POST /v1/scopes/{scope_id}/artifacts/{family}/search` |
 | Edit (submit complete content; `If-Match` checks the current revision) | `PUT /v1/scopes/{scope_id}/artifacts/{family}/{artifact_id}` |
-| Forget, retire, restore | `POST .../{artifact_id}/lifecycle` with `state` set to `deprecated`, `retired`, or `active` |
-| Undo a merge | `POST .../{artifact_id}/undo-merge` |
+| Change tags | `PUT .../{artifact_id}/tags`; query by tag with `POST /v1/scopes/{scope_id}/artifact-tags/query` |
+| Read the governance state (the `state_version` needed to forget or merge) | `GET .../{artifact_id}/governance` |
+| Merge | `POST /v1/scopes/{scope_id}/artifacts/{family}/merges` |
+| Forget | `POST .../{artifact_id}/forget` |
+| Restore, restore an earlier revision, undo a merge | `POST .../{artifact_id}/restorations` |
 | Add knowledge | Write a Source; the plugin processes it in its next invocation |
 
 Changes return their result synchronously. The plugin reads the changed state through its writer in its next invocation.
@@ -693,24 +696,51 @@ class ArtifactReads(Protocol):
 
 ## 4. User changes to plugin Artifacts
 
-Users change plugin Artifacts through core's generic Artifact APIs. Server executes each change with the same writer
-plugins use, in one short transaction, without calling the plugin or going through the Supervisor:
+Users change plugin Artifacts through core's generic Artifact APIs. Server executes each change synchronously in a short
+transaction, without calling the plugin or going through the Supervisor.
 
-| API | Write operation | Rules |
-| --- | --- | --- |
-| `PUT /v1/scopes/{scope_id}/artifacts/{family}/{artifact_id}` | `put(..., expected_revision=If-Match)` | The body is `{"content": {...}}`, stored as is; `If-Match` that differs from the current revision returns 412; the Artifact must exist |
-| `POST .../{artifact_id}/lifecycle` | `set_lifecycle` | `state` is `deprecated`, `retired`, or `active`, optionally with `replacement_artifact_id` |
-| `POST .../{artifact_id}/undo-merge` | `undo_merge` | Returns exact references to what was restored and retired |
+**Edits and tags**
 
-- **Permissions**: the same as Artifact writes for built-in families; the caller needs write permission on the Artifact
-  (`artifact.write`).
+| API | Rules |
+| --- | --- |
+| `PUT /v1/scopes/{scope_id}/artifacts/{family}/{artifact_id}` | The body is `{"content": {...}}`, stored as is, with search text taken from the declared `search_fields`; `If-Match` that differs from the current revision returns 412; the Artifact must exist. As with built-in edits, the submitted content is also stored as an internal Content Source (`lineage_only`) recorded in lineage as the new revision's direct source; such Sources never enter a plugin's input window |
+| `GET` / `PUT .../{artifact_id}/tags`, `POST /v1/scopes/{scope_id}/artifact-tags/query` | The same as for built-in families; tags create no content revision |
+
+**Merge, forget, and restoration**
+
+These come from the shared merge engine (`ArtifactMergeService`, [RFC #1859](1859_artifact_merge.md)), which was designed
+to be family-agnostic: each family supplies an adapter that builds merged content and maintains its own index, and the
+engine does version checks, cascading restoration, lineage records, and permission checks. The runtime finds a family's
+engine instance through a registry (`ArtifactMergeApplication`). Experience and Atomic Memory are the registered built-in
+families today; when Server loads a plugin, it creates an engine instance for the plugin family (the plugin adapter plus
+the shared Artifact access policy) and registers it.
+
+A set of family-agnostic APIs sits on the registry and works for every registered family; unregistered families return
+422:
+
+| API | Rules |
+| --- | --- |
+| `GET .../{artifact_id}/governance` | Returns the current revision, lifecycle state, `state_version`, and merge target |
+| `POST /v1/scopes/{scope_id}/artifacts/{family}/merges` | Takes at least two current Artifacts as `artifact_id`, `revision`, and `state_version`, plus the result's complete content; creates the result Artifact and freezes every input. Any changed input returns 409 |
+| `POST .../{artifact_id}/forget` | Takes `revision` and `state_version`; marks the Artifact deprecated with no replacement, appends no revision, and removes it from search |
+| `POST .../{artifact_id}/restorations` | `operation` is `restore` (default; `revision` restores earlier content) or `undo_merge`; restores and retires as one group |
+
+- **Permissions**: checked by the engine, the same as for built-in families. Changing an existing Artifact needs write
+  permission on it (`artifact.write`); creating a merge result needs the Scope contribute permission, and the caller owns
+  the result. The writer in plugin invocations uses the same engine class and adapter with different permissions: a
+  plugin has full write access to its family's Artifacts, including results of user merges.
+- **No preview**: Atomic Memory's dedicated APIs can preview a restoration's effect and then execute it with a signed
+  token. The generic APIs offer no preview and therefore need no signing key; restoration and undo merge act on the state
+  at execution time, while merge and forget are checked by `revision` and `state_version`.
+- **Merge content**: merge content for a plugin family is opaque JSON; core checks only that it is a JSON object and takes
+  search text from `search_fields`. Built-in families validate it against their own content models.
 - **Concurrency**: user changes and plugin invocations can overlap. A plugin that reads outside the transaction and writes
   with `expected_revision` inside it detects the conflict and rolls back; its next invocation decides again from the
   changed state, so a user change is never silently overwritten by the plugin.
-- **Operations not exposed**: the public APIs do not create Artifacts or perform merges in plugin families. Artifact
-  identity and merge decisions belong to the plugin; a caller who wants to add knowledge writes a Source.
-- `lifecycle` and `undo-merge` are family-agnostic generic APIs that accept only plugin families in the first version;
-  built-in families keep their own lifecycle and restoration APIs.
+- **No notification**: as for built-in families, user changes are recorded only in lineage and governance state and do not
+  notify the plugin. The plugin reads the new state through its writer in its next invocation.
+- **Creation**: the public APIs do not create plugin Artifacts directly, except merge results. A caller who wants to add
+  knowledge writes a Source.
 
 ## 5. Plugin executor and consumption cursor
 
@@ -847,8 +877,9 @@ ranges added and removed.
 | Removed | Custom family declarative indexes (`ArtifactSearchDeclaration`, `TextIndex`, and so on), `ArtifactFamily` schema declarations, `ArtifactDraft`, and the old Worker plugin executor |
 | Added | `powercontext.plugins`: `SourcePlugin`, `ArtifactPlugin`, `Inputs`, `Interval`, `Cron`, `PluginContext`, and the writer and read interfaces |
 | Added | `GET /v1/plugins`, `GET /v1/plugins/{name}`, `GET /v1/plugins/{name}/scopes` (`server.admin`, read-only) |
-| Added | `POST /v1/scopes/{scope_id}/artifacts/{family}/{artifact_id}/lifecycle` and `POST .../{artifact_id}/undo-merge` (generic APIs; the first version accepts only plugin families) |
+| Added | `GET .../{artifact_id}/governance`, `POST /v1/scopes/{scope_id}/artifacts/{family}/merges`, `POST .../{artifact_id}/forget`, `POST .../{artifact_id}/restorations`: generic APIs on the shared merge engine registry that work for every registered family (Experience and Atomic Memory among built-ins, plus loaded plugin families). Atomic Memory's dedicated APIs are unchanged |
 | Changed | `PUT /v1/scopes/{scope_id}/artifacts/{family}/{artifact_id}` accepts plugin families with a `{"content": {...}}` body |
+| Changed | The tag APIs accept plugin families: `TaggableArtifactFamily` changes from an enum to a string in the `ArtifactReadFamily` format, and Server accepts built-in families or loaded plugin families. The wire format is unchanged; generated clients lose the enum type |
 | Changed | The generic Artifact read and search APIs support plugin families; `GET /v1/capabilities` lists plugin families |
 | Changed | The write usage of `pc_source_add` uses plugin definitions, and its collect usage adds collection targets; `pc_source_capabilities` lists plugin Source types and target inputs; `pc_source_status` reports targets and their latest collection result; `pc_source_target_set_enabled` acts on targets stored by core |
 | Changed | The environment variable `POWERCONTEXT_SERVER_PLUGINS_DIR` replaces `POWERCONTEXT_SERVER_ARTIFACT_PLUGINS_DIR` and the Source plugin directory setting |
@@ -917,6 +948,7 @@ persisted, so the operational APIs report no "last call result".
 | A short write transaction block inside `generate` (this proposal) | Slow work stays outside the block; inside it, core's write operations and validation are reused directly, real revisions are returned, and reads see the block's writes; at the end it commits with the cursor and acknowledgment, and an exception rolls back. The cost is holding locks inside the block, bounded by a time limit |
 | Run user commands through the plugin (queue manual requests the plugin handles in its next invocation) | Plugins must parse commands and callers can only wait asynchronously; a command that always fails blocks later generation in the Scope; and the request queue must be persisted. Forget, restore, and edit are generic operations core already has, and running them synchronously in core is simpler |
 | Plugin-specific trigger and management APIs | Callers would have to tell plugins from built-ins; the existing Source and Artifact APIs already cover the operations callers need |
+| Generic merge APIs for plugin families only | Needs a separate family allowlist in the APIs. The registry already decides which families can be changed, and a family without an adapter cannot register; built-in permission checks live in the engine, so both entry points apply the same checks |
 | Resident plugin processes (like Dify's plugin daemon) | Could reuse connections and support other languages, but needs process management, a serialization protocol, and a cancellation protocol. The interfaces are request / response models, so the execution mechanism can change later without changing plugin code |
 | Hot reload | Would reintroduce load states, registration generation fencing, and reclaiming old calls, which contradicts the goals |
 
@@ -963,10 +995,7 @@ Reasons for this choice:
 | Windows that keep failing | A Source window that always fails blocks later invocations in the Scope. Whether to offer an operation that skips it or moves it to a dead letter, and how to record skipped input |
 | Consuming every Source type | `inputs.source_types` must list each type; built-in Atomic Memory consumes every Source usable for generation. Whether to support `"*"` for all types |
 | Built-in-only capabilities | Scope Prompt management, the write gate with decision observations, and model usage statistics serve only built-in families today, and plugins cannot use them. Whether and how to open them to plugins |
-| Notifying plugins of user changes | User changes do not call the plugin, so its owned index can only defer to core when read or be rebuilt periodically. Whether user changes should become a trigger delivered to the plugin so it can update owned storage promptly |
-| Authorization granularity for user changes | `artifact.write` authorizes by Artifact ownership, and Artifacts a plugin writes are owned by the Worker identity that ran it. Whether ordinary Scope members can change plugin Artifacts, and whether authorization should use the Scope contribute permission instead |
-| Tag writes for plugin families | Plugins can write tags through the writer; whether the public `PUT .../tags` should accept plugin families too |
-| Generic lifecycle APIs for built-in families | `lifecycle` and `undo-merge` accept only plugin families in the first version. Whether built-in families should move to these two generic APIs so callers use one pattern |
+| Atomic Memory's dedicated APIs | With the generic merge APIs, Atomic Memory merge, forget, and restoration have a dedicated and a generic entry point that behave the same. Whether to keep the dedicated APIs or make them aliases of the generic ones |
 
 # Future possibilities
 

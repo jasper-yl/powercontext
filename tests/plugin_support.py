@@ -20,14 +20,18 @@ import textwrap
 from pathlib import Path
 from typing import Any
 
+from powercontext.artifacts.search import ArtifactSearchExecutionContext
 from powercontext.builtin.persistence.processing_intents import ArtifactProcessingIntentRepository
+from powercontext.builtin.persistence.sources import SourceRepository
 from powercontext.builtin.persistence.supervision import ArtifactProcessingLeaseRepository
 from powercontext.builtin.plugins.executor import PluginWorkerSpec, execute_plugin
 from powercontext.builtin.plugins.families import plugin_artifact_repository
 from powercontext.builtin.plugins.manifest import load_plugin
-from powercontext.builtin.plugins.writer import change_plugin_artifact
+from powercontext.builtin.plugins.writer import plugin_merge_service, replace_plugin_artifact
+from powercontext.builtin.runtime.artifact_merge import ArtifactMergeAccess, ArtifactMergeApplication
 from powercontext.builtin.runtime.config import SQLiteConfig
 from powercontext.builtin.runtime.processing_contracts import ArtifactProcessingWorkAssignment
+from powercontext.builtin.sources import BUILTIN_SOURCE_REGISTRY
 
 DECLARATION = """
 
@@ -72,11 +76,25 @@ async def invoke(database, directory: Path, scope_id: str):
     return await execute_plugin(spec, assignment, database=database)
 
 
-async def change(database, directory: Path, scope_id: str, operation):
-    """Apply a public Artifact change the way the Server's generic Artifact routes do."""
+async def edit(database, directory: Path, scope_id: str, artifact_id: str, content, *, expected_revision: int):
+    """Replace a plugin Artifact the way the Server's PUT route does."""
 
     manifest, _ = load_plugin(directory)
-    return await change_plugin_artifact(database, manifest.spec, scope_id, operation)
+    return await replace_plugin_artifact(
+        database, manifest.spec, scope_id, artifact_id, content, expected_revision=expected_revision
+    )
+
+
+def governance(database, directory: Path, scope_id: str):
+    """The merge, forget and restoration the Server's generic routes run for a plugin family."""
+
+    manifest, _ = load_plugin(directory)
+    family = manifest.spec.family
+    service = plugin_merge_service(family, ArtifactMergeAccess(family), SourceRepository(BUILTIN_SOURCE_REGISTRY))
+    application = ArtifactMergeApplication(
+        database, (service,), default_context=ArtifactSearchExecutionContext(trusted_local=True)
+    )
+    return application.for_scope(scope_id, family)
 
 
 async def current(database, family: str, scope_id: str, artifact_id: str):

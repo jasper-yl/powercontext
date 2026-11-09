@@ -2320,51 +2320,265 @@ OPENAPI_SCHEMA: dict[str, JsonValue] = {
                 },
             }
         },
-        "/v1/scopes/{scope_id}/artifacts/{family}/{artifact_id}/lifecycle": {
+        "/v1/scopes/{scope_id}/artifacts/{family}/merges": {
             "post": {
                 "tags": ["artifacts"],
-                "summary": "Change an Artifact's lifecycle state",
-                "description": "Forget "
-                "(deprecated), "
-                "retire, "
-                "or "
-                "restore "
-                "(active) "
-                "a "
+                "summary": "Merge exact current Artifacts into a new Artifact",
+                "description": "Freezes "
+                "every "
+                "input into "
+                "a new "
+                "result "
+                "Artifact "
+                "in one "
+                "transaction. "
+                "Available "
+                "for every "
+                "Family "
+                "registered "
+                "with the "
+                "shared "
+                "merge "
+                "service, "
+                "including "
                 "plugin "
+                "families; "
+                "other "
+                "families "
+                "return "
+                "422. The "
+                "caller "
+                "needs "
+                "write "
+                "access to "
+                "each "
+                "input.",
+                "operationId": "merge_artifacts",
+                "x-powercontext-scope-mode": "current",
+                "x-powercontext-access": {"resolver": "artifact_merge_domain_access"},
+                "parameters": [
+                    {
+                        "name": "scope_id",
+                        "in": "path",
+                        "required": True,
+                        "schema": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": ".*\\S.*"},
+                    },
+                    {
+                        "name": "family",
+                        "in": "path",
+                        "required": True,
+                        "schema": {"$ref": "#/components/schemas/ArtifactReadFamily"},
+                    },
+                ],
+                "requestBody": {
+                    "required": True,
+                    "content": {"application/json": {"schema": {"$ref": "#/components/schemas/MergeArtifactsRequest"}}},
+                },
+                "responses": {
+                    "200": {
+                        "description": "The merge result and the frozen inputs.",
+                        "content": {
+                            "application/json": {"schema": {"$ref": "#/components/schemas/ArtifactGovernanceResponse"}}
+                        },
+                    },
+                    "401": {"$ref": "#/components/responses/Unauthorized"},
+                    "403": {"$ref": "#/components/responses/Forbidden"},
+                    "404": {"$ref": "#/components/responses/NotFound"},
+                    "409": {"$ref": "#/components/responses/Conflict"},
+                    "422": {"$ref": "#/components/responses/InvalidRequest"},
+                    "503": {"$ref": "#/components/responses/Unavailable"},
+                },
+            }
+        },
+        "/v1/scopes/{scope_id}/artifacts/{family}/{artifact_id}/governance": {
+            "get": {
+                "tags": ["artifacts"],
+                "summary": "Read an Artifact's current governance state",
+                "description": "Returns "
+                "the "
+                "lifecycle "
+                "state, "
+                "state "
+                "version "
+                "and "
+                "merge "
+                "target "
+                "that "
+                "forget, "
+                "merge "
+                "and "
+                "restoration "
+                "check. "
+                "Available "
+                "for "
+                "every "
+                "Family "
+                "registered "
+                "with "
+                "the "
+                "shared "
+                "merge "
+                "service.",
+                "operationId": "get_artifact_governance",
+                "x-powercontext-scope-mode": "current",
+                "x-powercontext-access": {"resolver": "artifact_merge_domain_access"},
+                "parameters": [
+                    {
+                        "name": "scope_id",
+                        "in": "path",
+                        "required": True,
+                        "schema": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": ".*\\S.*"},
+                    },
+                    {
+                        "name": "family",
+                        "in": "path",
+                        "required": True,
+                        "schema": {"$ref": "#/components/schemas/ArtifactReadFamily"},
+                    },
+                    {
+                        "name": "artifact_id",
+                        "in": "path",
+                        "required": True,
+                        "schema": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[\\x21-\\x7E]+$"},
+                    },
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The current governance state.",
+                        "content": {
+                            "application/json": {"schema": {"$ref": "#/components/schemas/ArtifactGovernanceRecord"}}
+                        },
+                    },
+                    "401": {"$ref": "#/components/responses/Unauthorized"},
+                    "403": {"$ref": "#/components/responses/Forbidden"},
+                    "404": {"$ref": "#/components/responses/NotFound"},
+                    "422": {"$ref": "#/components/responses/InvalidRequest"},
+                    "503": {"$ref": "#/components/responses/Unavailable"},
+                },
+            }
+        },
+        "/v1/scopes/{scope_id}/artifacts/{family}/{artifact_id}/forget": {
+            "post": {
+                "tags": ["artifacts"],
+                "summary": "Forget one Artifact without changing its content revision",
+                "description": "Deprecates "
+                "the "
+                "exact "
+                "current "
                 "Artifact "
                 "without "
-                "changing "
-                "its "
-                "content "
-                "revision. "
-                "Restoring "
+                "a "
+                "replacement "
+                "so "
+                "it "
+                "leaves "
+                "search; "
+                "restoration "
+                "brings "
+                "it "
+                "back. "
+                "Available "
+                "for "
+                "every "
+                "Family "
+                "registered "
+                "with "
+                "the "
+                "shared "
+                "merge "
+                "service.",
+                "operationId": "forget_artifact",
+                "x-powercontext-scope-mode": "current",
+                "x-powercontext-access": {"resolver": "artifact_merge_domain_access"},
+                "parameters": [
+                    {
+                        "name": "scope_id",
+                        "in": "path",
+                        "required": True,
+                        "schema": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": ".*\\S.*"},
+                    },
+                    {
+                        "name": "family",
+                        "in": "path",
+                        "required": True,
+                        "schema": {"$ref": "#/components/schemas/ArtifactReadFamily"},
+                    },
+                    {
+                        "name": "artifact_id",
+                        "in": "path",
+                        "required": True,
+                        "schema": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[\\x21-\\x7E]+$"},
+                    },
+                ],
+                "requestBody": {
+                    "required": True,
+                    "content": {"application/json": {"schema": {"$ref": "#/components/schemas/ForgetArtifactRequest"}}},
+                },
+                "responses": {
+                    "200": {
+                        "description": "The Artifact's governance state after forgetting.",
+                        "content": {
+                            "application/json": {"schema": {"$ref": "#/components/schemas/ArtifactGovernanceResponse"}}
+                        },
+                    },
+                    "401": {"$ref": "#/components/responses/Unauthorized"},
+                    "403": {"$ref": "#/components/responses/Forbidden"},
+                    "404": {"$ref": "#/components/responses/NotFound"},
+                    "409": {"$ref": "#/components/responses/Conflict"},
+                    "422": {"$ref": "#/components/responses/InvalidRequest"},
+                    "503": {"$ref": "#/components/responses/Unavailable"},
+                },
+            }
+        },
+        "/v1/scopes/{scope_id}/artifacts/{family}/{artifact_id}/restorations": {
+            "post": {
+                "tags": ["artifacts"],
+                "summary": "Restore an Artifact or undo the merge that produced it",
+                "description": "`restore` "
+                "reactivates "
+                "the "
+                "Artifact, "
+                "optionally "
+                "at "
                 "an "
-                "input "
-                "frozen "
-                "by "
+                "earlier "
+                "content "
+                "revision, "
+                "and "
+                "undoes "
+                "the "
+                "merges "
+                "that "
+                "froze "
+                "it. "
+                "`undo_merge` "
+                "restores "
                 "a "
                 "merge "
-                "undoes "
-                "that "
-                "merge "
+                "result's "
+                "inputs "
+                "and "
+                "retires "
+                "the "
+                "result. "
+                "Each "
+                "runs "
                 "as "
                 "one "
-                "group, "
-                "as "
-                "built-in "
-                "restoration "
-                "does. "
-                "Built-in "
-                "families "
-                "keep "
-                "their "
-                "own "
-                "lifecycle "
-                "operations.",
-                "operationId": "change_artifact_lifecycle",
+                "group. "
+                "Available "
+                "for "
+                "every "
+                "Family "
+                "registered "
+                "with "
+                "the "
+                "shared "
+                "merge "
+                "service.",
+                "operationId": "restore_artifact",
                 "x-powercontext-scope-mode": "current",
-                "x-powercontext-access": {"resolver": "path_artifact_write_access"},
+                "x-powercontext-access": {"resolver": "artifact_merge_domain_access"},
                 "parameters": [
                     {
                         "name": "scope_id",
@@ -2388,80 +2602,14 @@ OPENAPI_SCHEMA: dict[str, JsonValue] = {
                 "requestBody": {
                     "required": True,
                     "content": {
-                        "application/json": {"schema": {"$ref": "#/components/schemas/ChangeArtifactLifecycleRequest"}}
+                        "application/json": {"schema": {"$ref": "#/components/schemas/RestoreArtifactRequest"}}
                     },
                 },
                 "responses": {
                     "200": {
-                        "description": "The Artifact's lifecycle after the change.",
+                        "description": "The revisions restored and retired by the operation.",
                         "content": {
-                            "application/json": {"schema": {"$ref": "#/components/schemas/ArtifactLifecycleResult"}}
-                        },
-                    },
-                    "401": {"$ref": "#/components/responses/Unauthorized"},
-                    "403": {"$ref": "#/components/responses/Forbidden"},
-                    "404": {"$ref": "#/components/responses/NotFound"},
-                    "409": {"$ref": "#/components/responses/Conflict"},
-                    "422": {"$ref": "#/components/responses/InvalidRequest"},
-                    "503": {"$ref": "#/components/responses/Unavailable"},
-                },
-            }
-        },
-        "/v1/scopes/{scope_id}/artifacts/{family}/{artifact_id}/undo-merge": {
-            "post": {
-                "tags": ["artifacts"],
-                "summary": "Undo the merge that produced an Artifact",
-                "description": "Restores "
-                "the "
-                "merge "
-                "inputs "
-                "and "
-                "retires "
-                "the "
-                "merge "
-                "result "
-                "atomically. "
-                "Only "
-                "plugin "
-                "families "
-                "accept "
-                "this "
-                "operation; "
-                "built-in "
-                "families "
-                "keep "
-                "their "
-                "own "
-                "restoration "
-                "operations.",
-                "operationId": "undo_artifact_merge",
-                "x-powercontext-scope-mode": "current",
-                "x-powercontext-access": {"resolver": "path_artifact_write_access"},
-                "parameters": [
-                    {
-                        "name": "scope_id",
-                        "in": "path",
-                        "required": True,
-                        "schema": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": ".*\\S.*"},
-                    },
-                    {
-                        "name": "family",
-                        "in": "path",
-                        "required": True,
-                        "schema": {"$ref": "#/components/schemas/ArtifactReadFamily"},
-                    },
-                    {
-                        "name": "artifact_id",
-                        "in": "path",
-                        "required": True,
-                        "schema": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[\\x21-\\x7E]+$"},
-                    },
-                ],
-                "responses": {
-                    "200": {
-                        "description": "The revisions restored and retired by the undo.",
-                        "content": {
-                            "application/json": {"schema": {"$ref": "#/components/schemas/ArtifactUndoMergeResult"}}
+                            "application/json": {"schema": {"$ref": "#/components/schemas/ArtifactRestorationResult"}}
                         },
                     },
                     "401": {"$ref": "#/components/responses/Unauthorized"},
@@ -8348,40 +8496,101 @@ OPENAPI_SCHEMA: dict[str, JsonValue] = {
                 "required": ["items", "next_cursor"],
             },
             "ArtifactLifecycleState": {"type": "string", "enum": ["active", "deprecated", "retired"]},
-            "ChangeArtifactLifecycleRequest": {
+            "ArtifactGovernanceInput": {
                 "properties": {
-                    "state": {"$ref": "#/components/schemas/ArtifactLifecycleState"},
-                    "replacement_artifact_id": {
-                        "type": "string",
-                        "maxLength": 128,
-                        "minLength": 1,
-                        "description": "Artifact that supersedes this one when deprecating.",
+                    "artifact_id": {"type": "string", "maxLength": 128, "minLength": 1},
+                    "revision": {"type": "integer", "minimum": 1.0},
+                    "state_version": {"type": "integer", "minimum": 0.0},
+                },
+                "additionalProperties": False,
+                "type": "object",
+                "required": ["artifact_id", "revision", "state_version"],
+                "description": "An exact current Artifact the caller has read; a later change rejects the request.",
+            },
+            "MergeArtifactsRequest": {
+                "properties": {
+                    "inputs": {
+                        "items": {"$ref": "#/components/schemas/ArtifactGovernanceInput"},
+                        "type": "array",
+                        "minItems": 2,
+                    },
+                    "content": {
+                        "additionalProperties": True,
+                        "type": "object",
+                        "description": "Complete content of the result in the Family's content shape.",
+                    },
+                    "source_refs": {"items": {"$ref": "#/components/schemas/SourceReference"}, "type": "array"},
+                    "artifact_refs": {"items": {"$ref": "#/components/schemas/ArtifactReference"}, "type": "array"},
+                },
+                "additionalProperties": False,
+                "type": "object",
+                "required": ["inputs", "content"],
+            },
+            "ForgetArtifactRequest": {
+                "properties": {
+                    "revision": {"type": "integer", "minimum": 1.0},
+                    "state_version": {"type": "integer", "minimum": 0.0},
+                },
+                "additionalProperties": False,
+                "type": "object",
+                "required": ["revision", "state_version"],
+            },
+            "ArtifactRestorationOperation": {"type": "string", "enum": ["restore", "undo_merge"]},
+            "RestoreArtifactRequest": {
+                "properties": {
+                    "operation": {"$ref": "#/components/schemas/ArtifactRestorationOperation", "default": "restore"},
+                    "revision": {
+                        "type": "integer",
+                        "minimum": 1.0,
+                        "description": "Content "
+                        "revision "
+                        "to "
+                        "restore; "
+                        "omitted "
+                        "restores "
+                        "the "
+                        "current "
+                        "one. "
+                        "Not "
+                        "accepted "
+                        "with "
+                        "undo_merge.",
                         "nullable": True,
                     },
                 },
                 "additionalProperties": False,
                 "type": "object",
-                "required": ["state"],
             },
-            "ArtifactLifecycleResult": {
+            "ArtifactGovernanceRecord": {
                 "properties": {
                     "artifact": {"$ref": "#/components/schemas/ArtifactReference"},
                     "lifecycle_state": {"$ref": "#/components/schemas/ArtifactLifecycleState"},
+                    "state_version": {"type": "integer", "minimum": 0.0},
                     "merged_into_id": {"type": "string", "nullable": True},
-                    "replacement_artifact_id": {"type": "string", "nullable": True},
                 },
                 "additionalProperties": False,
                 "type": "object",
-                "required": ["artifact", "lifecycle_state", "merged_into_id", "replacement_artifact_id"],
+                "required": ["artifact", "lifecycle_state", "state_version", "merged_into_id"],
             },
-            "ArtifactUndoMergeResult": {
+            "ArtifactGovernanceResponse": {
                 "properties": {
+                    "changed": {"type": "boolean"},
+                    "records": {"items": {"$ref": "#/components/schemas/ArtifactGovernanceRecord"}, "type": "array"},
+                },
+                "additionalProperties": False,
+                "type": "object",
+                "required": ["changed", "records"],
+            },
+            "ArtifactRestorationResult": {
+                "properties": {
+                    "changed": {"type": "boolean"},
                     "restored": {"items": {"$ref": "#/components/schemas/ArtifactReference"}, "type": "array"},
                     "retired": {"items": {"$ref": "#/components/schemas/ArtifactReference"}, "type": "array"},
+                    "undo_merge_results": {"items": {"type": "string"}, "type": "array"},
                 },
                 "additionalProperties": False,
                 "type": "object",
-                "required": ["restored", "retired"],
+                "required": ["changed", "restored", "retired", "undo_merge_results"],
             },
             "ReplacePluginArtifactRequest": {
                 "properties": {"content": {"additionalProperties": True, "type": "object"}},
@@ -13117,17 +13326,17 @@ OPENAPI_SCHEMA: dict[str, JsonValue] = {
             },
             "TaggableArtifactFamily": {
                 "type": "string",
-                "enum": [
-                    "memory",
-                    "atomic-memory",
-                    "experience",
-                    "skill",
-                    "handoff",
-                    "profile",
-                    "prompt",
-                    "topic-memory",
-                ],
-                "description": "All readable Artifact families support logical tags on persisted Artifacts.",
+                "maxLength": 128,
+                "minLength": 1,
+                "pattern": "^[a-z][a-z0-9-]*$",
+                "description": "A built-in Family or a "
+                "loaded plugin family; every "
+                "readable Family supports "
+                "logical tags on persisted "
+                "Artifacts. The "
+                "collection-level memory "
+                "Family tags entries "
+                "instead.",
             },
             "TagMatch": {"type": "string", "enum": ["all", "any"]},
             "TagTargetType": {"type": "string", "enum": ["artifact", "memory_entry"]},

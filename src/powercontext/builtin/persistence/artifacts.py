@@ -145,6 +145,11 @@ class ArtifactRepository:
 
         return frozenset(self._by_family)
 
+    def content_type(self, family: str) -> type[BaseModel]:
+        """Return the content model this repository validates a Family's revisions against."""
+
+        return self._content_types[family]
+
     @property
     def source_repository(self) -> Any | None:
         """Expose the composed Source repository to services recording revision provenance."""

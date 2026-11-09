@@ -16,7 +16,9 @@
 
 Nothing about a plugin is persisted: the directory as it is at startup decides which
 plugins exist. Plugin code runs only in check and Worker child processes. Public
-changes to plugin Artifacts run here, through the same writer, without plugin code.
+changes to plugin Artifacts run here without plugin code: edits through
+``replace_plugin_artifact``, merge, forget and restoration through the shared merge
+registry each plugin family joins at startup.
 """
 
 from __future__ import annotations
@@ -25,13 +27,13 @@ import asyncio
 import json
 import logging
 import sys
-from collections.abc import Awaitable, Callable
+from collections.abc import Callable
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
 from datetime import timedelta
 from functools import partial
 from pathlib import Path
-from typing import Any, TypeVar
+from typing import Any
 
 from sqlalchemy import select
 
@@ -49,8 +51,9 @@ from powercontext.builtin.plugins.families import (
     register_source_binding,
 )
 from powercontext.builtin.plugins.manifest import PluginManifest
-from powercontext.builtin.plugins.writer import PluginArtifactTransaction, change_plugin_artifact
+from powercontext.builtin.plugins.writer import plugin_merge_service, replace_plugin_artifact
 from powercontext.builtin.records import BaseValueNotFoundError
+from powercontext.builtin.runtime.artifact_merge import ArtifactMergeAccess
 from powercontext.builtin.runtime.artifact_processing import (
     ArtifactProcessingBinding,
     ArtifactProcessingSupervisor,
@@ -67,7 +70,6 @@ logger = logging.getLogger(__name__)
 CHECK_TIMEOUT_SECONDS = 60
 # How soon a dirty Scope is admitted when the plugin asks to run on new Sources.
 ON_SOURCES_INTERVAL_SECONDS = 2.0
-ResultT = TypeVar("ResultT")
 
 
 @dataclass
@@ -137,9 +139,11 @@ class PluginManager:
         on_supervisor: Callable[[ArtifactProcessingSupervisors], None],
         plugins_dir: Path | None,
         *,
+        register_merge: Callable[[Any], None] | None = None,
         dispatch: bool = True,
     ) -> None:
         self.database = database
+        self.register_merge = register_merge
         # API-only instances register families for reads but never dispatch plugin Workers.
         self.dispatch = dispatch
         self.config = config
@@ -201,6 +205,12 @@ class PluginManager:
             raise ValueError("plugin manifest is unavailable")  # noqa: TRY003
         generate = manifest.spec
         register_plugin_family(generate.family)
+        if self.register_merge is not None:
+            self.register_merge(
+                plugin_merge_service(
+                    generate.family, ArtifactMergeAccess(generate.family), SourceRepository(BUILTIN_SOURCE_REGISTRY)
+                )
+            )
         async with self.database.transaction() as connection:
             await ensure_plugin_search(connection)
         scopes = None if generate.scopes is None else frozenset(generate.scopes)
@@ -324,13 +334,12 @@ class PluginManager:
                 return plugin.manifest
         return None
 
-    async def change(
-        self,
-        scope_id: str,
-        family: str,
-        operation: Callable[[PluginArtifactTransaction], Awaitable[ResultT]],
-    ) -> ResultT:
+    async def replace(
+        self, scope_id: str, family: str, artifact_id: str, content: dict[str, Any], *, expected_revision: int
+    ) -> None:
         manifest = self.plugin_for_family(family)
         if manifest is None:
             raise BaseValueNotFoundError("plugin_family", family)
-        return await change_plugin_artifact(self.database, manifest.spec, scope_id, operation)
+        await replace_plugin_artifact(
+            self.database, manifest.spec, scope_id, artifact_id, content, expected_revision=expected_revision
+        )

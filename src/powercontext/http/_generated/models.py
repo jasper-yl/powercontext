@@ -796,33 +796,68 @@ class ArtifactLifecycleState(StrEnum):
     RETIRED = "retired"
 
 
-class ChangeArtifactLifecycleRequest(BaseModel):
+class ArtifactGovernanceInput(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    state: ArtifactLifecycleState
-    replacement_artifact_id: Annotated[
-        StrictStr | None,
-        Field(description="Artifact that supersedes this one when deprecating.", max_length=128, min_length=1),
+    artifact_id: Annotated[StrictStr, Field(max_length=128, min_length=1)]
+    revision: Annotated[StrictInt, Field(ge=1)]
+    state_version: Annotated[StrictInt, Field(ge=0)]
+
+
+class ForgetArtifactRequest(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+    )
+    revision: Annotated[StrictInt, Field(ge=1)]
+    state_version: Annotated[StrictInt, Field(ge=0)]
+
+
+class ArtifactRestorationOperation(StrEnum):
+    RESTORE = "restore"
+    UNDO_MERGE = "undo_merge"
+
+
+class RestoreArtifactRequest(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+    )
+    operation: ArtifactRestorationOperation = ArtifactRestorationOperation.RESTORE
+    revision: Annotated[
+        StrictInt | None,
+        Field(
+            description="Content revision to restore; omitted restores the current one. Not accepted with undo_merge.",
+            ge=1,
+        ),
     ] = None
 
 
-class ArtifactLifecycleResult(BaseModel):
+class ArtifactGovernanceRecord(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
     artifact: ArtifactReference
     lifecycle_state: ArtifactLifecycleState
+    state_version: Annotated[StrictInt, Field(ge=0)]
     merged_into_id: Annotated[StrictStr | None, Field(...)]
-    replacement_artifact_id: Annotated[StrictStr | None, Field(...)]
 
 
-class ArtifactUndoMergeResult(BaseModel):
+class ArtifactGovernanceResponse(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
+    changed: StrictBool
+    records: list[ArtifactGovernanceRecord]
+
+
+class ArtifactRestorationResult(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+    )
+    changed: StrictBool
     restored: list[ArtifactReference]
     retired: list[ArtifactReference]
+    undo_merge_results: list[StrictStr]
 
 
 class ReplacePluginArtifactRequest(BaseModel):
@@ -2930,15 +2965,16 @@ class CreateSourceRequest(BaseModel):
     ]
 
 
-class TaggableArtifactFamily(StrEnum):
-    MEMORY = "memory"
-    ATOMIC_MEMORY = "atomic-memory"
-    EXPERIENCE = "experience"
-    SKILL = "skill"
-    HANDOFF = "handoff"
-    PROFILE = "profile"
-    PROMPT = "prompt"
-    TOPIC_MEMORY = "topic-memory"
+class TaggableArtifactFamily(RootModel[StrictStr]):
+    root: Annotated[
+        StrictStr,
+        Field(
+            description="A built-in Family or a loaded plugin family; every readable Family supports logical tags on persisted Artifacts. The collection-level memory Family tags entries instead.",
+            max_length=128,
+            min_length=1,
+            pattern="^[a-z][a-z0-9-]*$",
+        ),
+    ]
 
 
 class TagMatch(StrEnum):
@@ -4639,6 +4675,18 @@ class DreamRunPage(BaseModel):
     )
     runs: list[DreamRun]
     next_cursor: StrictStr | None = None
+
+
+class MergeArtifactsRequest(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+    )
+    inputs: Annotated[list[ArtifactGovernanceInput], Field(min_length=2)]
+    content: Annotated[
+        dict[str, Any], Field(description="Complete content of the result in the Family's content shape.")
+    ]
+    source_refs: list[SourceReference] | None = None
+    artifact_refs: list[ArtifactReference] | None = None
 
 
 class ExtractionObservation(BaseModel):

@@ -23,12 +23,12 @@ from __future__ import annotations
 
 import asyncio
 import hashlib
-import secrets
 from collections.abc import Awaitable, Callable, Collection, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from functools import partial
-from typing import Any, TypeVar
+from typing import Any, cast
+from uuid import uuid4
 
 from pydantic import JsonValue
 from sqlalchemy import delete, func, insert, select
@@ -37,7 +37,6 @@ from sqlalchemy.ext.asyncio import AsyncConnection
 from powercontext.artifacts import ArtifactLineage, ArtifactRef
 from powercontext.builtin.artifacts.merge import ArtifactMergeService
 from powercontext.builtin.artifacts.merge_models import ArtifactMergeRecord
-from powercontext.builtin.artifacts.merge_restoration import ArtifactMergePreviewSigner
 from powercontext.builtin.persistence.artifact_governance import (
     ArtifactGovernanceRepository,
     ArtifactLifecycleState,
@@ -45,6 +44,7 @@ from powercontext.builtin.persistence.artifact_governance import (
 from powercontext.builtin.persistence.artifacts import RepositoryArtifactDraft
 from powercontext.builtin.persistence.errors import RepositoryNotFoundError
 from powercontext.builtin.persistence.experience_index import search_approved_artifact_rows
+from powercontext.builtin.persistence.records import _canonical_source_text
 from powercontext.builtin.persistence.sources import SourceRepository
 from powercontext.builtin.persistence.tables import (
     ARTIFACT_HANDLES_TABLE,
@@ -60,14 +60,14 @@ from powercontext.builtin.plugins.families import (
 )
 from powercontext.builtin.runtime.artifact_merge import merge_artifact_tags
 from powercontext.builtin.sources import BUILTIN_SOURCE_REGISTRY
+from powercontext.builtin.sources.content import ContentSource, ContentSourceInternal, ContentSourceTarget
 from powercontext.builtin.tags import normalize_tags
 from powercontext.plugins import ArtifactPage, ArtifactPluginSpec, ArtifactSnapshot, LifecycleState, UndoMergePreview
-from powercontext.sources import SourceRef
+from powercontext.sources import SourceMaterialization, SourceRef
 
 MAX_WRITES_PER_TRANSACTION = 1000
 MAX_CONTENT_BYTES = 256 * 1024
 MAX_TRANSACTION_BYTES = 8 * 1024 * 1024
-ResultT = TypeVar("ResultT")
 
 
 class PluginWriteError(ValueError):
@@ -443,8 +443,17 @@ class PluginArtifactTransaction(_Reads):
         )
 
     async def preview_undo_merge(self, artifact_id: str, /) -> UndoMergePreview:
-        preview = self._owner.service.restoration_preview(await self._undo_plan(artifact_id))
-        return _undo_preview(preview.restore, preview.retire, preview.undo_merge_results, self._owner.family)
+        # Plugins act inside their own transaction, so the plan itself is the preview; no signed token.
+        plan = await self._undo_plan(artifact_id)
+        retire = {write.artifact_id for write in plan.writes if write.state is ArtifactLifecycleState.RETIRED}
+        return UndoMergePreview(
+            restore=tuple(
+                ArtifactRef(family=self._owner.family, artifact_id=item.artifact_id, revision=item.source_revision)
+                for item in plan.restore
+            ),
+            retire=tuple(read.ref for read in plan.reads if read.ref.artifact_id in retire),
+            undo_merge_results=plan.undo_merge_results,
+        )
 
     async def undo_merge(self, artifact_id: str, /) -> UndoMergePreview:
         self._admit()
@@ -515,7 +524,6 @@ class PluginArtifactWriter(_Reads):
     """Committed reads plus one write transaction.
 
     Inside an invocation the transaction also commits the cursor and acknowledgment.
-    The Server uses the same writer for public Artifact changes, with no window.
     """
 
     def __init__(
@@ -540,16 +548,9 @@ class PluginArtifactWriter(_Reads):
         self._begin = begin
         self._complete = complete
         self._timeout = transaction_timeout_seconds
-        self.artifacts = plugin_artifact_repository(family, sources)
+        self.service = plugin_merge_service(family, _Security(family, security), sources)
+        self.artifacts = self.service.artifacts
         self.states = ArtifactGovernanceRepository()
-        self.service = ArtifactMergeService(
-            artifacts=self.artifacts,
-            adapter=_Adapter(family),
-            security=_Security(family, security),
-            merge_tags=partial(merge_artifact_tags, family=family),
-            preview_signer=ArtifactMergePreviewSigner(keys={"plugin": secrets.token_bytes(32)}, active_key_id="plugin"),
-            sources=sources,
-        )
         self.opened = False
         self.committed = False
 
@@ -590,27 +591,63 @@ class PluginArtifactWriter(_Reads):
         self.committed = True
 
 
-async def change_plugin_artifact(
+def plugin_merge_service(family: str, security: Any, sources: SourceRepository) -> ArtifactMergeService:
+    """The shared governance engine for one plugin family; ``security`` decides who may change it.
+
+    Plugin invocations use Worker security. The Server registers a second instance with
+    the shared Artifact access policy for public merge, forget and restoration.
+    """
+
+    return ArtifactMergeService(
+        artifacts=plugin_artifact_repository(family, sources),
+        adapter=_Adapter(family),
+        security=security,
+        merge_tags=partial(merge_artifact_tags, family=family),
+        sources=sources,
+    )
+
+
+async def replace_plugin_artifact(
     database: Any,
     spec: ArtifactPluginSpec,
     scope_id: str,
-    operation: Callable[[PluginArtifactTransaction], Awaitable[ResultT]],
-) -> ResultT:
-    """Apply one public change to a plugin Artifact under the rules plugins write with.
+    artifact_id: str,
+    content: dict[str, JsonValue],
+    *,
+    expected_revision: int,
+) -> ArtifactSnapshot:
+    """Commit a user's complete replacement without plugin code.
 
-    Plugin code is not involved; the plugin sees the new state in its next invocation.
+    Like built-in edits, the submitted content is kept as a lineage-only Source bound to
+    the new revision; it never enters a plugin's input window.
     """
 
+    sources = SourceRepository(BUILTIN_SOURCE_REGISTRY)
     writer = PluginArtifactWriter(
-        database=database,
-        scope_id=scope_id,
-        family=spec.family,
-        sources=SourceRepository(BUILTIN_SOURCE_REGISTRY),
-        search_fields=spec.search_fields,
-        transaction_timeout_seconds=spec.transaction_timeout_seconds,
+        database=database, scope_id=scope_id, family=spec.family, sources=sources, search_fields=spec.search_fields
     )
-    async with writer.transaction() as transaction:
-        return await operation(transaction)
+    service = writer.service
+    async with asyncio.timeout(spec.transaction_timeout_seconds), database.transaction() as connection:
+        plan = await service.inspect_change(
+            connection, scope_id, artifact_id, writer.body(content), None, expected_revision=expected_revision
+        )
+        source = ContentSource(
+            name=f"src_{uuid4().hex}",
+            materialization=SourceMaterialization.CAPTURED,
+            content=_canonical_source_text(cast(JsonValue, content)),
+            wire_content=content,
+            wire_content_present=True,
+            internal=ContentSourceInternal(
+                role="lineage_only",
+                operation="artifact_replace",
+                target=ContentSourceTarget(
+                    scope_id=scope_id, family=spec.family, artifact_id=artifact_id, revision=expected_revision + 1
+                ),
+            ),
+        )
+        stored = await sources.add(connection, scope_id, source)
+        result = await service.commit(connection, await service.prepare_change(plan), None, direct_source=stored.ref)
+    return _snapshot(result.primary)
 
 
 def _snapshot(record: ArtifactMergeRecord) -> ArtifactSnapshot:
@@ -633,14 +670,4 @@ def _tag_identity(scope_id: str, family: str, artifact_id: str):
         tags.c.family == family,
         tags.c.artifact_id == artifact_id,
         tags.c.target_type == "artifact",
-    )
-
-
-def _undo_preview(restore, retire, undo_merge_results, family) -> UndoMergePreview:
-    return UndoMergePreview(
-        restore=tuple(
-            ArtifactRef(family=family, artifact_id=item.artifact_id, revision=item.source_revision) for item in restore
-        ),
-        retire=tuple(retire),
-        undo_merge_results=tuple(undo_merge_results),
     )
