@@ -28,13 +28,10 @@ class Notes:
         async with writer.transaction() as tx:
             for source in request.sources:
                 text = source.projection["content"]
-                await tx.put(writer.stable_id(source.ref.source_id), content={"text": text}, search_text=text,
-                             source_refs=[source.ref])
-            for command in request.requests:
-                await tx.set_lifecycle(command["retire"], "retired")
+                await tx.put(writer.stable_id(source.ref.source_id), content={"text": text}, source_refs=[source.ref])
 
 
-async def create(ctx, config):
+async def create(ctx):
     return Notes()
 """
 
@@ -43,61 +40,72 @@ raise ImportError("missing dependency")
 """
 
 
-def test_server_loads_plugins_dispatches_on_sources_and_serves_reads(tmp_path):
+def test_server_loads_plugins_dispatches_on_sources_and_serves_the_artifact_api(tmp_path):
     plugins = tmp_path / "plugins"
-    write_plugin(plugins, "notes", NOTES, on_sources=True)
-    write_plugin(plugins, "broken", BROKEN, on_sources=True)
+    write_plugin(plugins, "notes", NOTES)
+    write_plugin(plugins, "broken", BROKEN)
+
+    async def search(client, scope, query):
+        response = await client.post(f"/v1/scopes/{scope}/artifacts/notes/search", json={"query": query})
+        assert response.status_code == 200, response.text
+        return [item["content"]["text"] for item in response.json()["results"]]
 
     async def scenario():
         async with running_server(tmp_path, plugins) as client:
-            listing = (await client.get("/v1/plugins")).json()["items"]
-            assert {item["name"]: item["status"] for item in listing} == {"broken": "failed", "notes": "loaded"}
+            listing = {item["name"]: item for item in (await client.get("/v1/plugins")).json()["items"]}
+            assert {name: item["status"] for name, item in listing.items()} == {"broken": "failed", "notes": "loaded"}
+            assert listing["notes"]["source_types"] == ["content"] and listing["notes"]["triggers"] == ["sources"]
             assert "notes" in (await client.get("/v1/capabilities")).json()["artifact_families"]
 
             scope = await create_scope(client, "plugin-e2e")
             await capture(client, scope, "deploy", "Deploys go to the east region")
             await capture(client, scope, "keys", "Rotate signing keys monthly")
-            notes = await wait_for(
-                lambda: items(client, scope, "notes"), lambda value: len(value) == 2, log=tmp_path / "server.log"
-            )
+            log = tmp_path / "server.log"
+            notes = await wait_for(lambda: items(client, scope, "notes"), lambda value: len(value) == 2, log=log)
             bodies = {}
             for item in notes:
                 response = await client.get(f"/v1/scopes/{scope}/artifacts/notes/{item['artifact_id']}")
                 assert response.status_code == 200, response.text
                 bodies[item["artifact_id"]] = response.json()["content"]["text"]
-            assert set(bodies.values()) == {
-                "Deploys go to the east region",
-                "Rotate signing keys monthly",
-            }
+            assert set(bodies.values()) == {"Deploys go to the east region", "Rotate signing keys monthly"}
+            assert await search(client, scope, "region") == ["Deploys go to the east region"]
 
-            found = await client.post(f"/v1/scopes/{scope}/artifacts/notes/search", json={"query": "region"})
-            assert found.status_code == 200, found.text
-            assert [item["content"]["text"] for item in found.json()["results"]] == ["Deploys go to the east region"]
+            async def progress():
+                response = await client.get("/v1/plugins/notes/scopes")
+                assert response.status_code == 200, response.text
+                return {item["scope_id"]: item for item in response.json()["items"]}
 
-            target = next(item for item in notes if "east" in bodies[item["artifact_id"]])
-            accepted = await client.post(
-                f"/v1/scopes/{scope}/artifacts/notes/generate", json={"params": {"retire": target["artifact_id"]}}
+            state = (await wait_for(progress, lambda value: not value[scope]["pending"], log=log))[scope]
+            assert state["consumed_position"] == state["source_position"]
+
+            # Users change plugin Artifacts through the generic Artifact API; core runs it without the plugin.
+            target = next(key for key, text in bodies.items() if "east" in text)
+            path = f"/v1/scopes/{scope}/artifacts/notes/{target}"
+            edited = await client.put(
+                path,
+                json={"content": {"text": "Deploys go to the west region"}},
+                headers={"If-Match": (await client.get(path)).headers["ETag"]},
             )
-            assert accepted.status_code == 202, accepted.text
+            assert edited.status_code == 200, edited.text
+            assert edited.json()["revision"] == 2
+            assert await search(client, scope, "west") == ["Deploys go to the west region"]
+            stale = await client.put(path, json={"content": {"text": "lost update"}}, headers={"If-Match": '"1"'})
+            assert stale.status_code == 412, stale.text
 
-            async def searched():
-                response = await client.post(f"/v1/scopes/{scope}/artifacts/notes/search", json={"query": "region"})
-                return response.json()["results"]
+            retired = await client.post(f"{path}/lifecycle", json={"state": "retired"})
+            assert retired.status_code == 200, retired.text
+            assert retired.json()["lifecycle_state"] == "retired"
+            assert await search(client, scope, "region") == []
 
-            await wait_for(searched, lambda value: value == [], log=tmp_path / "server.log")
-            state = (await client.get("/v1/plugins/notes")).json()
-            assert state["last_outcome"] == "succeeded"
-
-            rejected = await client.put(
-                f"/v1/scopes/{scope}/artifacts/notes/{target['artifact_id']}", json={"content": {"text": "edited"}}
-            )
-            assert rejected.status_code in {404, 405, 422}, rejected.text
+            unknown = await client.post(f"/v1/scopes/{scope}/artifacts/unknown/x/lifecycle", json={"state": "retired"})
+            # Like the other generic Artifact writes, an unknown family is rejected before any work.
+            assert unknown.status_code == 422, unknown.text
 
     asyncio.run(scenario())
 
 
 def test_atomic_memory_plugin_runs_end_to_end_through_the_server(tmp_path):
-    from tests.examples.test_atomic_memory_plugin import FAMILY, deploy
+    from tests.examples.test_atomic_memory_plugin import FAMILY, deploy, environment
 
     plugins = tmp_path / "plugins"
     deploy(plugins)
@@ -108,7 +116,7 @@ def test_atomic_memory_plugin_runs_end_to_end_through_the_server(tmp_path):
         return response.json()["content"]["text"]
 
     async def scenario():
-        async with running_server(tmp_path, plugins) as client:
+        async with running_server(tmp_path, plugins, extra_env=environment()) as client:
             scope = await create_scope(client, "atomic-memory-plugin-e2e")
             await capture(client, scope, "a", "create|region|deploys go to east")
             await capture(client, scope, "b", "create|zone|primary zone is east-1")
@@ -129,14 +137,10 @@ def test_atomic_memory_plugin_runs_end_to_end_through_the_server(tmp_path):
                 if (await text(client, scope, item["artifact_id"])).startswith("zone"):
                     zone = item["artifact_id"]
             response = await client.post(
-                f"/v1/scopes/{scope}/artifacts/{FAMILY}/generate", json={"params": {"op": "forget", "id": zone}}
+                f"/v1/scopes/{scope}/artifacts/{FAMILY}/{zone}/lifecycle", json={"state": "deprecated"}
             )
-            assert response.status_code == 202, response.text
-
-            async def search_zone():
-                found = await client.post(f"/v1/scopes/{scope}/artifacts/{FAMILY}/search", json={"query": "zone"})
-                return [item["content"]["text"] for item in found.json()["results"]]
-
-            await wait_for(search_zone, lambda value: value == [], log=log)
+            assert response.status_code == 200, response.text
+            found = await client.post(f"/v1/scopes/{scope}/artifacts/{FAMILY}/search", json={"query": "zone"})
+            assert found.json()["results"] == []
 
     asyncio.run(scenario())

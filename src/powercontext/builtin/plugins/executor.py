@@ -33,13 +33,7 @@ from powercontext.builtin.persistence.cursors import SourceCursorRepository
 from powercontext.builtin.persistence.generation_sources import GenerationSourceAccess
 from powercontext.builtin.persistence.sources import SourceRepository
 from powercontext.builtin.plugins.families import register_plugin_family
-from powercontext.builtin.plugins.manifest import (
-    PluginManifest,
-    load_module,
-    plugin_config,
-    plugin_factory,
-)
-from powercontext.builtin.plugins.requests import clear_requests, pending_requests
+from powercontext.builtin.plugins.manifest import PluginManifest, load_plugin
 from powercontext.builtin.plugins.writer import PluginArtifactWriter, PluginWriteError
 from powercontext.builtin.runtime.config import DatabaseConfig
 from powercontext.builtin.runtime.processing_contracts import (
@@ -55,7 +49,7 @@ logger = logging.getLogger(__name__)
 
 @dataclass(frozen=True)
 class PluginWorkerSpec:
-    """Picklable Worker input; configuration values are resolved inside the Worker."""
+    """Picklable Worker input; the plugin reads its own settings inside the Worker."""
 
     database: DatabaseConfig
     directory: str
@@ -90,9 +84,9 @@ async def execute_plugin(  # noqa: C901 - one window from selection through ackn
     spec: PluginWorkerSpec, assignment: ArtifactProcessingWorkAssignment, /, *, database: Any = None
 ) -> ArtifactProcessingWorkerCompletion:
     manifest = PluginManifest.model_validate(spec.manifest)
-    generate = manifest.generate
+    generate = manifest.spec
     if assignment.binding_name != manifest.binding_name or assignment.artifact_family != generate.family:
-        raise ValueError("assignment does not match the plugin manifest")  # noqa: TRY003
+        raise ValueError("assignment does not match the plugin declaration")  # noqa: TRY003
     register_plugin_family(generate.family)
     scope_id = assignment.scope_id
     binding = manifest.binding_name
@@ -106,7 +100,7 @@ async def execute_plugin(  # noqa: C901 - one window from selection through ackn
         security = await resources.enter_async_context(open_worker_security(spec.security, database))
 
         async def authorize(connection) -> None:
-            if manifest.scopes is not None and scope_id not in manifest.scopes:
+            if generate.scopes is not None and scope_id not in generate.scopes:
                 raise PluginWriteError("the Scope is outside the plugin's scopes")  # noqa: TRY003
             if security is not None:
                 await security.authorize_transaction(connection, scope_id)
@@ -126,7 +120,6 @@ async def execute_plugin(  # noqa: C901 - one window from selection through ackn
                     rows = await GenerationSourceAccess(sources).list_window_for_generation(
                         connection, scope_id, after=after, through=through
                     )
-                requests = await pending_requests(connection, binding, scope_id)
             window = ()
             if inputs is not None:
                 key = inputs.projection_key
@@ -155,8 +148,6 @@ async def execute_plugin(  # noqa: C901 - one window from selection through ackn
                         SourceCursor(sequence=through),
                         expected_generation=None if cursor is None else cursor.generation,
                     )
-                if requests:
-                    await clear_requests(connection, binding, scope_id, requests[-1][0])
                 remaining = inputs is not None and await sources.journal_position(connection, scope_id) > through
                 await invocation.complete(connection, remaining_work=remaining)
 
@@ -164,6 +155,7 @@ async def execute_plugin(  # noqa: C901 - one window from selection through ackn
                 database=database,
                 scope_id=scope_id,
                 family=generate.family,
+                search_fields=generate.search_fields,
                 window_sources=frozenset((item.ref.source_type, item.ref.source_id) for item in window),
                 sources=sources,
                 begin=begin,
@@ -171,12 +163,12 @@ async def execute_plugin(  # noqa: C901 - one window from selection through ackn
                 transaction_timeout_seconds=generate.transaction_timeout_seconds,
                 security=security,
             )
-            call = bool(requests) or bool(window) or inputs is None
+            call = bool(window) or inputs is None
             if call:
                 directory = Path(spec.directory)
-                module = load_module(directory, manifest)
-                factory = plugin_factory(module, manifest)
-                config = plugin_config(module, manifest)
+                loaded, declaration = load_plugin(directory)
+                if loaded != manifest:
+                    raise ValueError("the plugin changed after the Server checked it; restart the Server")  # noqa: TRY003
                 async with AsyncExitStack() as plugin_resources:
                     context = PluginContext(
                         name=manifest.name,
@@ -186,13 +178,10 @@ async def execute_plugin(  # noqa: C901 - one window from selection through ackn
                         resources=plugin_resources,
                     )
                     request = GenerateRequest(
-                        scope_id=scope_id,
-                        reason="manual" if requests else "sources" if window else "schedule",
-                        sources=window,
-                        requests=tuple(params for _, params in requests),
+                        scope_id=scope_id, reason="sources" if window else "schedule", sources=window
                     )
                     try:
-                        plugin = await factory(context, config)
+                        plugin = await declaration.create(context)
                         await plugin.generate(request, writer)
                     except Exception as error:
                         if not writer.committed:

@@ -20,48 +20,47 @@ import textwrap
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from powercontext.builtin.persistence.processing_intents import ArtifactProcessingIntentRepository
 from powercontext.builtin.persistence.supervision import ArtifactProcessingLeaseRepository
 from powercontext.builtin.plugins.executor import PluginWorkerSpec, execute_plugin
 from powercontext.builtin.plugins.families import plugin_artifact_repository
-from powercontext.builtin.plugins.manifest import read_manifest
-from powercontext.builtin.plugins.requests import accept_request
+from powercontext.builtin.plugins.manifest import load_plugin
+from powercontext.builtin.plugins.writer import change_plugin_artifact
 from powercontext.builtin.runtime.config import SQLiteConfig
 from powercontext.builtin.runtime.processing_contracts import ArtifactProcessingWorkAssignment
 
+DECLARATION = """
 
-def write_plugin(root: Path, name: str, code: str, **generate: Any) -> Path:
+from powercontext.plugins import ArtifactPlugin as _ArtifactPlugin, Inputs as _Inputs
+
+plugin = _ArtifactPlugin(
+    family={family!r},
+    inputs=_Inputs(source_types=("content",), projection="powercontext.text-evidence@1"),
+    create=create,
+    **{spec!r},
+)
+"""
+
+
+def write_plugin(root: Path, name: str, code: str, **spec: Any) -> Path:
+    """Write ``code`` as ``plugin.py`` and declare it as a plugin consuming content Sources."""
+
     directory = root / name
     directory.mkdir(parents=True)
-    (directory / "plugin.py").write_text(textwrap.dedent(code), encoding="utf-8")
-    manifest = {
-        "name": name,
-        "kind": "artifact",
-        "entry": "./plugin.py:create",
-        "generate": {
-            "family": name,
-            "inputs": {"source_types": ["content"], "projection": "powercontext.text-evidence@1"},
-            "manual": True,
-            **generate,
-        },
-    }
-    (directory / "plugin.yml").write_text(yaml.safe_dump(manifest), encoding="utf-8")
+    declaration = DECLARATION.format(family=name, spec={"on_sources": True, **spec})
+    (directory / "plugin.py").write_text(textwrap.dedent(code) + declaration, encoding="utf-8")
     return directory
 
 
-async def invoke(database, directory: Path, scope_id: str, *, requests: tuple[Any, ...] = ()):
-    manifest = read_manifest(directory)
+async def invoke(database, directory: Path, scope_id: str):
+    manifest, _ = load_plugin(directory)
     async with database.transaction() as connection:
         lease = await ArtifactProcessingLeaseRepository().start_single_process_term(connection, "test-owner")
-        for params in requests:
-            await accept_request(connection, manifest.binding_name, scope_id, params)
         intent = await ArtifactProcessingIntentRepository().request(connection, scope_id, manifest.binding_name)
     assignment = ArtifactProcessingWorkAssignment(
         binding_name=manifest.binding_name,
         scope_id=scope_id,
-        artifact_family=manifest.generate.family,
+        artifact_family=manifest.spec.family,
         claimed_request_generation=intent.requested_generation,
         fence=lease.fence("single-process"),
         worker_id="test-worker",
@@ -71,6 +70,13 @@ async def invoke(database, directory: Path, scope_id: str, *, requests: tuple[An
         database=SQLiteConfig(), directory=str(directory), manifest=manifest.model_dump(mode="json")
     )
     return await execute_plugin(spec, assignment, database=database)
+
+
+async def change(database, directory: Path, scope_id: str, operation):
+    """Apply a public Artifact change the way the Server's generic Artifact routes do."""
+
+    manifest, _ = load_plugin(directory)
+    return await change_plugin_artifact(database, manifest.spec, scope_id, operation)
 
 
 async def current(database, family: str, scope_id: str, artifact_id: str):

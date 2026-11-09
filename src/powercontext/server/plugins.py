@@ -15,7 +15,8 @@
 """Load plugins at startup and hand their calls to the Artifact processing Supervisor.
 
 Nothing about a plugin is persisted: the directory as it is at startup decides which
-plugins exist. Plugin code runs only in check and Worker child processes.
+plugins exist. Plugin code runs only in check and Worker child processes. Public
+changes to plugin Artifacts run here, through the same writer, without plugin code.
 """
 
 from __future__ import annotations
@@ -24,29 +25,32 @@ import asyncio
 import json
 import logging
 import sys
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from contextlib import AsyncExitStack
 from dataclasses import dataclass, field
-from datetime import UTC, datetime, timedelta
+from datetime import timedelta
 from functools import partial
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
-from pydantic import JsonValue
+from sqlalchemy import select
 
 from powercontext._logging import log_safely
+from powercontext.builtin.persistence.cursors import SourceCursorRepository
 from powercontext.builtin.persistence.database import AsyncDatabase
 from powercontext.builtin.persistence.oceanbase import OceanBaseConfig
 from powercontext.builtin.persistence.processing_intents import ArtifactProcessingIntentRepository
+from powercontext.builtin.persistence.sources import SourceRepository
+from powercontext.builtin.persistence.tables import ARTIFACT_PROCESSING_INTENTS_TABLE
 from powercontext.builtin.plugins.executor import PluginWorkerSpec, run_plugin_worker
 from powercontext.builtin.plugins.families import (
     ensure_plugin_search,
     register_plugin_family,
     register_source_binding,
 )
-from powercontext.builtin.plugins.manifest import CronSchedule, IntervalSchedule, PluginManifest
-from powercontext.builtin.plugins.requests import accept_request
-from powercontext.builtin.records import BaseOperationNotSupportedError, BaseValueNotFoundError
+from powercontext.builtin.plugins.manifest import PluginManifest
+from powercontext.builtin.plugins.writer import PluginArtifactTransaction, change_plugin_artifact
+from powercontext.builtin.records import BaseValueNotFoundError
 from powercontext.builtin.runtime.artifact_processing import (
     ArtifactProcessingBinding,
     ArtifactProcessingSupervisor,
@@ -55,12 +59,15 @@ from powercontext.builtin.runtime.artifact_processing import (
 )
 from powercontext.builtin.runtime.config import DatabaseConfig
 from powercontext.builtin.runtime.processing_discovery import SourceProcessingPendingProvider
-from powercontext.http._generated.models import PluginPage, PluginState
+from powercontext.builtin.sources import BUILTIN_SOURCE_REGISTRY
+from powercontext.http._generated.models import PluginPage, PluginScopePage, PluginScopeState, PluginState
+from powercontext.plugins import Cron, Interval
 
 logger = logging.getLogger(__name__)
 CHECK_TIMEOUT_SECONDS = 60
 # How soon a dirty Scope is admitted when the plugin asks to run on new Sources.
 ON_SOURCES_INTERVAL_SECONDS = 2.0
+ResultT = TypeVar("ResultT")
 
 
 @dataclass
@@ -69,21 +76,15 @@ class _Plugin:
     directory: Path
     manifest: PluginManifest | None = None
     error: str | None = None
-    last_outcome: str | None = None
-    last_finished_at: datetime | None = None
     tasks: list[asyncio.Task[None]] = field(default_factory=list)
 
     def state(self) -> PluginState:
-        generate = None if self.manifest is None else self.manifest.generate
+        spec = None if self.manifest is None else self.manifest.spec
         triggers = []
-        if generate is not None:
+        if spec is not None:
             triggers = [
                 name
-                for name, enabled in (
-                    ("schedule", generate.schedule is not None),
-                    ("sources", generate.on_sources),
-                    ("manual", generate.manual),
-                )
+                for name, enabled in (("schedule", spec.schedule is not None), ("sources", spec.on_sources))
                 if enabled
             ]
         return PluginState.model_validate({
@@ -91,47 +92,12 @@ class _Plugin:
             "kind": "artifact",
             "status": "failed" if self.error is not None else "loaded",
             "error": self.error,
-            "family": None if generate is None else generate.family,
+            "family": None if spec is None else spec.family,
             "binding_name": None if self.manifest is None else self.manifest.binding_name,
-            "scopes": None if self.manifest is None or self.manifest.scopes is None else list(self.manifest.scopes),
+            "scopes": None if spec is None or spec.scopes is None else list(spec.scopes),
+            "source_types": None if spec is None or spec.inputs is None else list(spec.inputs.source_types),
             "triggers": triggers,
-            "last_outcome": self.last_outcome,
-            "last_finished_at": self.last_finished_at,
         })
-
-
-class _ObservedLauncher:
-    """Record the latest Worker outcome in memory for the read-only plugin listing."""
-
-    def __init__(self, launcher: SpawnArtifactProcessingWorkerLauncher, plugin: _Plugin) -> None:
-        self._launcher = launcher
-        self._plugin = plugin
-
-    async def start(self, assignment):
-        handle = await self._launcher.start(assignment)
-        return _ObservedHandle(handle, self._plugin)
-
-
-class _ObservedHandle:
-    def __init__(self, handle, plugin: _Plugin) -> None:
-        self._handle = handle
-        self._plugin = plugin
-
-    async def wait(self):
-        try:
-            completion = await self._handle.wait()
-        except BaseException:
-            self._finish("failed")
-            raise
-        self._finish("succeeded")
-        return completion
-
-    async def terminate(self) -> None:
-        await self._handle.terminate()
-
-    def _finish(self, outcome: str) -> None:
-        self._plugin.last_outcome = outcome
-        self._plugin.last_finished_at = datetime.now(UTC)
 
 
 async def check_plugin_directory(directory: Path) -> PluginManifest:
@@ -199,10 +165,10 @@ class PluginManager:
             self.plugins[entry.name] = plugin
             try:
                 manifest = await check_plugin_directory(plugin.directory)
-                if manifest.generate.family in families:
+                if manifest.spec.family in families:
                     raise ValueError("family is already provided by another plugin")  # noqa: TRY003, TRY301
                 plugin.manifest = manifest
-                families.add(manifest.generate.family)
+                families.add(manifest.spec.family)
                 await self._register(plugin)
             except Exception as error:
                 plugin.error = str(error) if isinstance(error, ValueError) else type(error).__name__
@@ -233,21 +199,21 @@ class PluginManager:
         manifest = plugin.manifest
         if manifest is None:
             raise ValueError("plugin manifest is unavailable")  # noqa: TRY003
-        generate = manifest.generate
+        generate = manifest.spec
         register_plugin_family(generate.family)
         async with self.database.transaction() as connection:
             await ensure_plugin_search(connection)
-        scopes = None if manifest.scopes is None else frozenset(manifest.scopes)
+        scopes = None if generate.scopes is None else frozenset(generate.scopes)
         inputs = generate.inputs
         if inputs is not None:
             register_source_binding(manifest.binding_name, scopes, frozenset(inputs.source_types))
         interval = None
         cron = None
         if inputs is not None:
-            if isinstance(generate.schedule, CronSchedule):
+            if isinstance(generate.schedule, Cron):
                 cron = generate.schedule
             seconds = [
-                *([generate.schedule.interval_seconds] if isinstance(generate.schedule, IntervalSchedule) else []),
+                *([generate.schedule.seconds] if isinstance(generate.schedule, Interval) else []),
                 *([ON_SOURCES_INTERVAL_SECONDS] if generate.on_sources else []),
             ]
             interval = timedelta(seconds=min(seconds)) if seconds else None
@@ -269,13 +235,11 @@ class PluginManager:
             ArtifactProcessingBinding(
                 binding_name=manifest.binding_name,
                 artifact_family=generate.family,
-                launcher=_ObservedLauncher(
-                    SpawnArtifactProcessingWorkerLauncher(partial(run_plugin_worker, spec)), plugin
-                ),
+                launcher=SpawnArtifactProcessingWorkerLauncher(partial(run_plugin_worker, spec)),
                 max_workers=generate.max_workers,
                 worker_timeout_seconds=generate.timeout_seconds,
                 automatic_processing_interval=interval,
-                cron=None if cron is None else cron.cron,
+                cron=None if cron is None else cron.expression,
                 timezone="Asia/Shanghai" if cron is None else cron.timezone,
                 pending_provider=None
                 if inputs is None
@@ -285,12 +249,10 @@ class PluginManager:
             ),
         )
         supervisor.wake(manifest.binding_name)
-        if inputs is None and isinstance(generate.schedule, IntervalSchedule):
+        if inputs is None and isinstance(generate.schedule, Interval):
             # Without inputs there is no dirty Source work; request each listed Scope when due.
             plugin.tasks.append(
-                asyncio.create_task(
-                    self._tick(manifest, generate.schedule.interval_seconds), name=f"plugin-{plugin.name}"
-                )
+                asyncio.create_task(self._tick(manifest, generate.schedule.seconds), name=f"plugin-{plugin.name}")
             )
 
     async def _tick(self, manifest: PluginManifest, seconds: float) -> None:
@@ -299,7 +261,7 @@ class PluginManager:
             await asyncio.sleep(seconds)
             try:
                 async with self.database.transaction() as connection:
-                    for scope_id in manifest.scopes or ():
+                    for scope_id in manifest.spec.scopes or ():
                         await intents.request(connection, scope_id, manifest.binding_name)
                 if self.supervisor is not None:
                     self.supervisor.wake(manifest.binding_name)
@@ -309,28 +271,66 @@ class PluginManager:
     def page(self) -> PluginPage:
         return PluginPage(items=[plugin.state() for _, plugin in sorted(self.plugins.items())])
 
-    def get(self, name: str) -> PluginState:
+    def _plugin(self, name: str) -> _Plugin:
         plugin = self.plugins.get(name)
         if plugin is None:
             raise BaseValueNotFoundError("plugin", name)
-        return plugin.state()
+        return plugin
+
+    def get(self, name: str) -> PluginState:
+        return self._plugin(name).state()
+
+    async def scopes(self, name: str, *, cursor: str | None, limit: int) -> PluginScopePage:
+        """Per-Scope progress, read from the shared intent and cursor tables by any Server role."""
+
+        manifest = self._plugin(name).manifest
+        if manifest is None:
+            return PluginScopePage(items=[], next_cursor=None)
+        intents = ARTIFACT_PROCESSING_INTENTS_TABLE
+        statement = (
+            select(intents)
+            .where(intents.c.binding_name == manifest.binding_name)
+            .order_by(intents.c.scope_id)
+            .limit(limit + 1)
+        )
+        if cursor is not None:
+            statement = statement.where(intents.c.scope_id > cursor)
+        sources = SourceRepository(BUILTIN_SOURCE_REGISTRY)
+        consumes = manifest.spec.inputs is not None
+        items = []
+        async with self.database.transaction() as connection:
+            rows = (await connection.execute(statement)).mappings().all()
+            for row in rows[:limit]:
+                scope_id = row["scope_id"]
+                consumed = source_position = None
+                if consumes:
+                    saved = await SourceCursorRepository().load(connection, scope_id, manifest.binding_name)
+                    consumed = 0 if saved is None else saved.cursor.sequence
+                    source_position = await sources.journal_position(connection, scope_id)
+                items.append(
+                    PluginScopeState(
+                        scope_id=scope_id,
+                        pending=row["dirty_generation"] > row["clean_generation"]
+                        or row["requested_generation"] > row["handled_generation"],
+                        consumed_position=consumed,
+                        source_position=source_position,
+                    )
+                )
+        return PluginScopePage(items=items, next_cursor=rows[limit - 1]["scope_id"] if len(rows) > limit else None)
 
     def plugin_for_family(self, family: str) -> PluginManifest | None:
         for plugin in self.plugins.values():
-            if plugin.error is None and plugin.manifest is not None and plugin.manifest.generate.family == family:
+            if plugin.error is None and plugin.manifest is not None and plugin.manifest.spec.family == family:
                 return plugin.manifest
         return None
 
-    async def request(self, scope_id: str, family: str, params: JsonValue) -> int:
+    async def change(
+        self,
+        scope_id: str,
+        family: str,
+        operation: Callable[[PluginArtifactTransaction], Awaitable[ResultT]],
+    ) -> ResultT:
         manifest = self.plugin_for_family(family)
         if manifest is None:
             raise BaseValueNotFoundError("plugin_family", family)
-        if not manifest.generate.manual:
-            raise BaseOperationNotSupportedError("artifact_family", family, "manual generation")
-        if manifest.scopes is not None and scope_id not in manifest.scopes:
-            raise BaseOperationNotSupportedError("artifact_family", family, "generation outside the plugin's scopes")
-        async with self.database.transaction() as connection:
-            sequence = await accept_request(connection, manifest.binding_name, scope_id, params)
-        if self.supervisor is not None:
-            self.supervisor.wake(manifest.binding_name)
-        return sequence
+        return await change_plugin_artifact(self.database, manifest.spec, scope_id, operation)

@@ -17,13 +17,20 @@
 The domain decisions reuse the built-in extraction and reconciliation contracts:
 extract candidates from the Source window, recall related memories, let the model
 create, revise, merge or drop each candidate, then apply the decisions. Storage,
-merge, lifecycle and restoration go through the plugin writer. User commands arrive
-as manual requests: remember, edit, forget, restore and undo_merge.
+merge, lifecycle and restoration go through the plugin writer.
+
+The plugin only generates. Users add memories by writing Sources, and edit, forget,
+restore or undo a merge through the generic Artifact API, which core executes
+without calling the plugin.
+
+Settings come from ``ATOMIC_MEMORY_PLUGIN_<FIELD>`` environment variables, for
+example ``ATOMIC_MEMORY_PLUGIN_MODEL=openai:gpt-5-mini``.
 """
 
 from __future__ import annotations
 
 import importlib
+import os
 from pathlib import Path
 from typing import Any, Literal
 
@@ -48,24 +55,37 @@ from powercontext.builtin.artifacts.atomic_memory.reconciliation import (
     AtomicMemoryWorkingItem,
 )
 from powercontext.plugins import (
+    ArtifactPlugin,
     ArtifactSnapshot,
     ArtifactTransaction,
     ArtifactWriter,
     GenerateRequest,
+    Inputs,
     PluginContext,
 )
+
+ENVIRONMENT_PREFIX = "ATOMIC_MEMORY_PLUGIN_"
 
 
 class Config(BaseModel):
     # A Pydantic AI model name such as "openai:gpt-5-mini", or "python:module:attribute"
     # naming an async factory that returns an AtomicMemoryGenerationPipeline.
     model: str
-    extraction_profile: Literal["coding", "general"] = "coding"
+    extraction_profile: Literal["coding", "conversation"] = "coding"
     model_timeout_seconds: float = Field(default=120, gt=0)
     related_limit: int = Field(default=20, ge=1, le=200)
     comparison_batch_size: int = Field(default=8, ge=1)
     index_path: str = "memory-index.sqlite3"
     index_threshold: float = Field(default=0.6, ge=0, le=1)
+
+    @classmethod
+    def from_environment(cls) -> Config:
+        values = {
+            name: os.environ[ENVIRONMENT_PREFIX + name.upper()]
+            for name in cls.model_fields
+            if ENVIRONMENT_PREFIX + name.upper() in os.environ
+        }
+        return cls.model_validate(values)
 
 
 class MemoryConflict(RuntimeError):
@@ -80,13 +100,10 @@ class AtomicMemoryPlugin:
         self.index = index
 
     async def generate(self, request: GenerateRequest, writer: ArtifactWriter) -> None:
-        workset = await self._decide(request, writer) if request.sources else None
+        workset = await self._decide(request, writer)
         async with writer.transaction() as tx:
-            if workset is not None:
-                for item in workset.changes():
-                    await self._apply(tx, writer, item)
-            for command in request.requests:
-                await self._command(tx, writer, command)
+            for item in workset.changes():
+                await self._apply(tx, writer, item)
 
     # Model work outside the write transaction.
 
@@ -133,19 +150,22 @@ class AtomicMemoryPlugin:
         return workset
 
     async def _related(self, writer: ArtifactWriter, text: str) -> list[AtomicMemoryWorkingItem]:
-        """Recall through core text search and the plugin's own index; core decides what is current."""
+        """Recall through core text search and the plugin's own index; core decides what is current.
+
+        Index entries are only candidate IDs. Core's current snapshot is what the model compares,
+        so entries left by a rolled-back attempt or by a public edit cannot bring in stale text.
+        """
 
         found: dict[str, ArtifactSnapshot] = {
             item.ref.artifact_id: item for item in await writer.search(text, limit=self.config.related_limit)
         }
-        for artifact_id, revision, _ in await self.index.nearest(
+        for artifact_id, _, _ in await self.index.nearest(
             self.ctx.scope_id, text, threshold=self.config.index_threshold, limit=self.config.related_limit
         ):
             if artifact_id in found:
                 continue
             current = await writer.get(artifact_id)
-            # Entries left by an uncommitted attempt or an older revision are ignored.
-            if current is not None and current.ref.revision == revision:
+            if current is not None:
                 found[artifact_id] = current
         items = []
         for snapshot in found.values():
@@ -192,7 +212,6 @@ class AtomicMemoryPlugin:
                 inputs,
                 into=into,
                 content=_body(content),
-                search_text=_search_text(content),
                 source_refs=item.sources,
                 artifact_refs=evidence_refs,
             )
@@ -203,7 +222,6 @@ class AtomicMemoryPlugin:
             written = await tx.put(
                 origin.ref.artifact_id,
                 content=_body(item.content),
-                search_text=_search_text(item.content),
                 source_refs=item.sources,
                 artifact_refs=evidence_refs,
                 expected_revision=origin.ref.revision,
@@ -215,69 +233,11 @@ class AtomicMemoryPlugin:
             written = await tx.put(
                 identity,
                 content=_body(item.content),
-                search_text=_search_text(item.content),
                 source_refs=item.sources,
                 artifact_refs=evidence_refs,
             )
         # The plugin-owned index is written once the real revision is known.
         await self.index.upsert(self.ctx.scope_id, written.ref.artifact_id, written.ref.revision, item.content.text)
-
-    async def _command(self, tx: ArtifactTransaction, writer: ArtifactWriter, command: Any) -> None:
-        operation = command.get("op") if isinstance(command, dict) else None
-        if operation == "remember":
-            content = AtomicMemoryContent(
-                kind=command.get("kind", "fact"), text=command["text"], description=command.get("description")
-            )
-            identity = command.get("id") or writer.stable_id("remembered", content.kind, content.text)
-            written = await tx.put(identity, content=_body(content), search_text=_search_text(content))
-            await self.index.upsert(self.ctx.scope_id, identity, written.ref.revision, content.text)
-        elif operation == "edit":
-            current = await tx.get(command["id"])
-            if current is None:
-                return
-            previous = AtomicMemoryContent.model_validate(current.content)
-            content = previous.model_copy(
-                update={key: command[key] for key in ("text", "kind", "description") if key in command}
-            )
-            written = await tx.put(
-                command["id"],
-                content=_body(content),
-                search_text=_search_text(content),
-                expected_revision=command.get("expected_revision"),
-            )
-            await self.index.upsert(self.ctx.scope_id, command["id"], written.ref.revision, content.text)
-        elif operation == "forget":
-            await tx.set_lifecycle(command["id"], "deprecated")
-            await self.index.remove(self.ctx.scope_id, command["id"])
-        elif operation == "restore":
-            await self._restore(tx, command["id"], command.get("revision"))
-        elif operation == "undo_merge":
-            outcome = await tx.undo_merge(command["id"])
-            await self._reindex(tx, (ref.artifact_id for ref in outcome.restore))
-            await self.index.remove(self.ctx.scope_id, command["id"])
-        else:
-            self.ctx.logger.warning("Ignoring an unknown Atomic Memory command")
-
-    async def _restore(self, tx: ArtifactTransaction, artifact_id: str, revision: int | None) -> None:
-        current = await tx.get(artifact_id)
-        if current is None:
-            return
-        # One shared restoration both reactivates the memory and, when asked, restores old content.
-        if revision is not None:
-            await tx.revert(artifact_id, to_revision=revision)
-        elif current.lifecycle_state != "active" or current.merged_into_id is not None:
-            await tx.set_lifecycle(artifact_id, "active")
-        affected = {artifact_id, *(ref.artifact_id for ref in await tx.merge_inputs(artifact_id))}
-        await self._reindex(tx, affected)
-
-    async def _reindex(self, tx: ArtifactTransaction, identities) -> None:
-        for identity in identities:
-            snapshot = await tx.get(identity)
-            if snapshot is None or snapshot.lifecycle_state != "active" or snapshot.merged_into_id is not None:
-                await self.index.remove(self.ctx.scope_id, identity)
-                continue
-            text = AtomicMemoryContent.model_validate(snapshot.content).text
-            await self.index.upsert(self.ctx.scope_id, identity, snapshot.ref.revision, text)
 
 
 def _read(snapshot: ArtifactSnapshot) -> AtomicMemoryRead:
@@ -299,10 +259,6 @@ def _read(snapshot: ArtifactSnapshot) -> AtomicMemoryRead:
 
 def _body(content: AtomicMemoryContent) -> dict[str, Any]:
     return content.model_dump(mode="json", by_alias=True)
-
-
-def _search_text(content: AtomicMemoryContent) -> str:
-    return "\n".join(part for part in (content.kind, content.description, content.text) if part)
 
 
 async def _pipeline(config: Config, ctx: PluginContext) -> AtomicMemoryGenerationPipeline:
@@ -350,10 +306,22 @@ async def _pipeline(config: Config, ctx: PluginContext) -> AtomicMemoryGeneratio
     )
 
 
-async def create(ctx: PluginContext, config: Config) -> AtomicMemoryPlugin:
+async def create(ctx: PluginContext) -> AtomicMemoryPlugin:
+    config = Config.from_environment()
     path = Path(config.index_path)
     if not path.is_absolute():
         path = ctx.plugin_dir / path
     index = await ctx.enter_async_context(MemoryIndex(path))
     pipeline = await _pipeline(config, ctx)
     return AtomicMemoryPlugin(ctx, config, pipeline, index)
+
+
+plugin = ArtifactPlugin(
+    family="atomic-memory-plugin",
+    inputs=Inputs(source_types=("content",), projection="powercontext.text-evidence@1", max_sources=20),
+    on_sources=True,
+    search_fields=("kind", "description", "text"),
+    timeout_seconds=600,
+    transaction_timeout_seconds=30,
+    create=create,
+)

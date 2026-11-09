@@ -16,7 +16,8 @@
 
 These scenarios mirror the built-in Atomic Memory behavior: one Artifact per memory,
 revision on update, merge into a new identity with frozen inputs, undo of a merge,
-forget and restore, and cursor safety when the model fails.
+forget and restore, and cursor safety when the model fails. User changes use the
+generic Artifact operations core runs without the plugin.
 """
 
 import asyncio
@@ -27,7 +28,6 @@ from typing import Any
 from uuid import uuid4
 
 import pytest
-import yaml
 from sqlalchemy import select
 
 from powercontext.builtin.inference import InferenceTimeoutError
@@ -37,20 +37,32 @@ from powercontext.builtin.plugins.search import PluginArtifactSearcher, PluginAr
 from powercontext.builtin.runtime.composition import open_builtin_contexts
 from powercontext.builtin.runtime.config import BuiltinConfig, SQLiteConfig
 from powercontext.builtin.scope import ScopeDraft
-from tests.plugin_support import current, invoke
+from tests.plugin_support import change, current, invoke
 
 EXAMPLE = Path(__file__).resolve().parents[2] / "examples/plugins/atomic_memory"
 FAMILY = "atomic-memory-plugin"
 BINDING = f"plugin:{FAMILY}"
 
 
-def deploy(root: Path, **config) -> Path:
+def deploy(root: Path) -> Path:
     directory = root / FAMILY
     shutil.copytree(EXAMPLE, directory, ignore=shutil.ignore_patterns("__pycache__", "*.sqlite3"))
-    manifest = yaml.safe_load((directory / "plugin.yml").read_text())
-    manifest["config"] = {"model": "python:tests.atomic_memory_plugin_fake:pipeline", **config}
-    (directory / "plugin.yml").write_text(yaml.safe_dump(manifest), encoding="utf-8")
     return directory
+
+
+def environment(**settings: object) -> dict[str, str]:
+    values = {"model": "python:tests.atomic_memory_plugin_fake:pipeline", **settings}
+    return {f"ATOMIC_MEMORY_PLUGIN_{name.upper()}": str(value) for name, value in values.items()}
+
+
+@pytest.fixture
+def settings(monkeypatch):
+    def apply(**values: object) -> None:
+        for name, value in environment(**values).items():
+            monkeypatch.setenv(name, value)
+
+    apply()
+    return apply
 
 
 async def heads(database, scope: str) -> dict[str, dict[str, Any]]:
@@ -97,7 +109,7 @@ async def _scope(contexts) -> str:
     return (await contexts.scopes.create(draft)).scope_id
 
 
-def test_extraction_revision_and_noop_follow_model_decisions(tmp_path, config):
+def test_extraction_revision_and_noop_follow_model_decisions(tmp_path, config, settings):
     directory = deploy(tmp_path / "plugins")
 
     async def scenario():
@@ -132,7 +144,7 @@ def test_extraction_revision_and_noop_follow_model_decisions(tmp_path, config):
     asyncio.run(scenario())
 
 
-def test_merge_freezes_inputs_and_undo_restores_them(tmp_path, config):
+def test_merge_freezes_inputs_and_undo_restores_them(tmp_path, config, settings):
     directory = deploy(tmp_path / "plugins")
 
     async def scenario():
@@ -152,7 +164,7 @@ def test_merge_freezes_inputs_and_undo_restores_them(tmp_path, config):
             assert region["merged_into"] == merged_id and zone["merged_into"] == merged_id
             assert set(await searchable(contexts, scope, "east")) == {"region zone: region east and zone east-1"}
 
-            await invoke(database, directory, scope, requests=({"op": "undo_merge", "id": merged_id},))
+            await change(database, directory, scope, lambda tx: tx.undo_merge(merged_id))
             memories = await heads(database, scope)
             assert memories[merged_id]["state"] == "retired"
             assert memories[region_id]["merged_into"] is None and memories[region_id]["state"] == "active"
@@ -167,7 +179,7 @@ def test_merge_freezes_inputs_and_undo_restores_them(tmp_path, config):
             await invoke(database, directory, scope)
             again = await heads(database, scope)
             second_id, _ = by_text(again, "region zone: combined east placement")
-            await invoke(database, directory, scope, requests=({"op": "restore", "id": region_id},))
+            await change(database, directory, scope, lambda tx: tx.set_lifecycle(region_id, "active"))
             restored = await heads(database, scope)
             assert restored[second_id]["state"] == "retired"
             assert restored[region_id]["merged_into"] is None
@@ -175,40 +187,47 @@ def test_merge_freezes_inputs_and_undo_restores_them(tmp_path, config):
     asyncio.run(scenario())
 
 
-def test_user_commands_forget_restore_remember_and_edit(tmp_path, config):
+def test_user_changes_edit_forget_and_restore_without_the_plugin(tmp_path, config, settings):
     directory = deploy(tmp_path / "plugins")
 
     async def scenario():
         async with open_builtin_contexts(config) as contexts:
             database = contexts.database
             scope = await _scope(contexts)
-            await invoke(
-                database,
-                directory,
-                scope,
-                requests=(
-                    {"op": "remember", "id": "pref", "text": "prefers concise answers", "kind": "preference"},
-                    {"op": "edit", "id": "pref", "text": "prefers concise answers with code"},
-                ),
-            )
-            memories = await heads(database, scope)
-            assert memories["pref"]["text"] == "prefers concise answers with code"
-            assert memories["pref"]["revision"] == 2
+            # Remembering is writing a Source; the plugin extracts it like any other.
+            await contexts.records.create_source(scope, "content", "create|pref|prefers concise answers")
+            await invoke(database, directory, scope)
+            ((pref_id, pref),) = (await heads(database, scope)).items()
 
-            await invoke(database, directory, scope, requests=({"op": "forget", "id": "pref"},))
-            assert (await heads(database, scope))["pref"]["state"] == "deprecated"
+            edited = {**pref["content"], "text": "pref: prefers concise answers with code"}
+            await change(database, directory, scope, lambda tx: tx.put(pref_id, content=edited, expected_revision=1))
+            memories = await heads(database, scope)
+            assert memories[pref_id]["text"] == "pref: prefers concise answers with code"
+            assert memories[pref_id]["revision"] == 2
+            assert await searchable(contexts, scope, "code") == ["pref: prefers concise answers with code"]
+
+            await change(database, directory, scope, lambda tx: tx.set_lifecycle(pref_id, "deprecated"))
+            assert (await heads(database, scope))[pref_id]["state"] == "deprecated"
             assert await searchable(contexts, scope, "concise") == []
 
-            await invoke(database, directory, scope, requests=({"op": "restore", "id": "pref", "revision": 1},))
-            restored = (await heads(database, scope))["pref"]
-            assert restored["state"] == "active" and restored["text"] == "prefers concise answers"
-            assert restored["revision"] == 3
-            assert await searchable(contexts, scope, "concise") == ["prefers concise answers"]
+            await change(database, directory, scope, lambda tx: tx.set_lifecycle(pref_id, "active"))
+            restored = (await heads(database, scope))[pref_id]
+            # Shared restoration records the restore as a new revision with the same content.
+            assert restored["state"] == "active" and restored["revision"] == 3
+            assert restored["text"] == "pref: prefers concise answers with code"
+            assert await searchable(contexts, scope, "concise") == ["pref: prefers concise answers with code"]
+
+            # The next window recalls the edited memory: core's current revision is what the model sees.
+            await contexts.records.create_source(scope, "content", "update|pref|prefers detailed answers")
+            await invoke(database, directory, scope)
+            revised = (await heads(database, scope))[pref_id]
+            assert revised["text"] == "pref: prefers detailed answers" and revised["revision"] == 4
+            assert (pref_id, 3) in {(ref.artifact_id, ref.revision) for ref in revised["lineage"].artifacts}
 
     asyncio.run(scenario())
 
 
-def test_model_failure_keeps_the_window_and_owned_index_failure_rolls_back(tmp_path, config):
+def test_model_failure_keeps_the_window_and_owned_index_failure_rolls_back(tmp_path, config, settings):
     directory = deploy(tmp_path / "plugins")
 
     async def scenario():
@@ -240,8 +259,9 @@ def test_model_failure_keeps_the_window_and_owned_index_failure_rolls_back(tmp_p
     asyncio.run(scenario())
 
 
-def test_stale_owned_index_entries_are_ignored(tmp_path, config):
-    directory = deploy(tmp_path / "plugins", index_threshold=0.1)
+def test_owned_index_entries_only_nominate_current_memories(tmp_path, config, settings):
+    settings(index_threshold=0.1)
+    directory = deploy(tmp_path / "plugins")
 
     async def scenario():
         async with open_builtin_contexts(config) as contexts:
@@ -261,7 +281,8 @@ def test_stale_owned_index_entries_are_ignored(tmp_path, config):
             await invoke(database, directory, scope)
             memories = await heads(database, scope)
             assert "ghost" not in memories
-            # Core text search still found the current memory, so the update revised it.
+            # The stale entry still nominated the memory, and core's current revision was revised.
             assert memories[region_id]["revision"] == 2
+            assert memories[region_id]["text"] == "region: deploys go to north"
 
     asyncio.run(scenario())

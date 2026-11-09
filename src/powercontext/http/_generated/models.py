@@ -727,16 +727,6 @@ class PluginLoadStatus(StrEnum):
 class PluginTrigger(StrEnum):
     SCHEDULE = "schedule"
     SOURCES = "sources"
-    MANUAL = "manual"
-
-
-class PluginCallOutcome(StrEnum):
-    SUCCEEDED = "succeeded"
-    FAILED = "failed"
-
-
-class PluginRequestStatus(StrEnum):
-    ACCEPTED = "accepted"
 
 
 class PluginState(BaseModel):
@@ -750,9 +740,11 @@ class PluginState(BaseModel):
     family: Annotated[StrictStr | None, Field(...)]
     binding_name: Annotated[StrictStr | None, Field(...)]
     scopes: Annotated[list[StrictStr] | None, Field(...)]
+    source_types: Annotated[
+        list[StrictStr] | None,
+        Field(description="Source types delivered to the plugin; null when it consumes no Sources."),
+    ]
     triggers: list[PluginTrigger]
-    last_outcome: Annotated[PluginCallOutcome | None, Field(description="Latest call since process start.")]
-    last_finished_at: Annotated[AwareDatetime | None, Field(...)]
 
 
 class PluginPage(BaseModel):
@@ -762,21 +754,82 @@ class PluginPage(BaseModel):
     items: list[PluginState]
 
 
-class GeneratePluginArtifactsRequest(BaseModel):
+class PluginScopeState(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    params: Annotated[
-        Any | None, Field(description="Plugin-defined request value delivered unchanged to the plugin.")
+    scope_id: StrictStr
+    pending: Annotated[
+        StrictBool, Field(description="New Sources or a schedule request are waiting for an invocation.")
+    ]
+    consumed_position: Annotated[
+        StrictInt | None,
+        Field(
+            description="Source journal position the plugin has consumed through; null when it consumes no Sources.",
+            ge=0,
+        ),
+    ]
+    source_position: Annotated[
+        StrictInt | None, Field(description="Latest Source journal position in the Scope, of any Source type.", ge=0)
+    ]
+
+
+class ListPluginScopesRequest(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+    )
+    cursor: Annotated[StrictStr | None, Field(max_length=256, min_length=1)] = None
+    limit: Annotated[StrictInt, Field(ge=1, le=200)] = 50
+
+
+class PluginScopePage(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+    )
+    items: list[PluginScopeState]
+    next_cursor: Annotated[StrictStr | None, Field(...)]
+
+
+class ArtifactLifecycleState(StrEnum):
+    ACTIVE = "active"
+    DEPRECATED = "deprecated"
+    RETIRED = "retired"
+
+
+class ChangeArtifactLifecycleRequest(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+    )
+    state: ArtifactLifecycleState
+    replacement_artifact_id: Annotated[
+        StrictStr | None,
+        Field(description="Artifact that supersedes this one when deprecating.", max_length=128, min_length=1),
     ] = None
 
 
-class GeneratePluginArtifactsResponse(BaseModel):
+class ArtifactLifecycleResult(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    status: PluginRequestStatus
-    request_sequence: Annotated[StrictInt, Field(ge=1)]
+    artifact: ArtifactReference
+    lifecycle_state: ArtifactLifecycleState
+    merged_into_id: Annotated[StrictStr | None, Field(...)]
+    replacement_artifact_id: Annotated[StrictStr | None, Field(...)]
+
+
+class ArtifactUndoMergeResult(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+    )
+    restored: list[ArtifactReference]
+    retired: list[ArtifactReference]
+
+
+class ReplacePluginArtifactRequest(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+    )
+    content: dict[str, Any]
 
 
 class DesiredState(StrEnum):
@@ -6124,6 +6177,7 @@ class ReplaceArtifactRequest(
         | ReplaceHandoffArtifactRequest
         | ReplacePromptArtifactRequest
         | ReplaceProfileArtifactRequest
+        | ReplacePluginArtifactRequest
     ]
 ):
     root: (
@@ -6135,6 +6189,7 @@ class ReplaceArtifactRequest(
         | ReplaceHandoffArtifactRequest
         | ReplacePromptArtifactRequest
         | ReplaceProfileArtifactRequest
+        | ReplacePluginArtifactRequest
     )
 
 

@@ -28,7 +28,7 @@ from collections.abc import Awaitable, Callable, Collection, Sequence
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from functools import partial
-from typing import Any
+from typing import Any, TypeVar
 
 from pydantic import JsonValue
 from sqlalchemy import delete, func, insert, select
@@ -56,15 +56,18 @@ from powercontext.builtin.plugins.families import (
     PluginArtifactContent,
     plugin_artifact_repository,
     publish_search_text,
+    search_text,
 )
 from powercontext.builtin.runtime.artifact_merge import merge_artifact_tags
+from powercontext.builtin.sources import BUILTIN_SOURCE_REGISTRY
 from powercontext.builtin.tags import normalize_tags
-from powercontext.plugins import ArtifactPage, ArtifactSnapshot, LifecycleState, UndoMergePreview
+from powercontext.plugins import ArtifactPage, ArtifactPluginSpec, ArtifactSnapshot, LifecycleState, UndoMergePreview
 from powercontext.sources import SourceRef
 
 MAX_WRITES_PER_TRANSACTION = 1000
 MAX_CONTENT_BYTES = 256 * 1024
 MAX_TRANSACTION_BYTES = 8 * 1024 * 1024
+ResultT = TypeVar("ResultT")
 
 
 class PluginWriteError(ValueError):
@@ -326,14 +329,13 @@ class PluginArtifactTransaction(_Reads):
         /,
         *,
         content: dict[str, JsonValue],
-        search_text: str | None = None,
         source_refs: Sequence[SourceRef] = (),
         artifact_refs: Sequence[ArtifactRef] = (),
         expected_revision: int | None = None,
     ) -> ArtifactSnapshot:
         self._admit(content, source_refs)
         owner = self._owner
-        body = PluginArtifactContent(content=content, search_text=search_text)
+        body = owner.body(content)
         current = await self._record(self._connection, artifact_id)
         if current is not None and current.artifact.content == body:
             if expected_revision is not None and expected_revision != current.artifact.revision:
@@ -409,7 +411,6 @@ class PluginArtifactTransaction(_Reads):
         *,
         into: str,
         content: dict[str, JsonValue],
-        search_text: str | None = None,
         source_refs: Sequence[SourceRef] = (),
         artifact_refs: Sequence[ArtifactRef] = (),
     ) -> ArtifactSnapshot:
@@ -429,7 +430,7 @@ class PluginArtifactTransaction(_Reads):
             owner.scope_id,
             into,
             reads,
-            PluginArtifactContent(content=content, search_text=search_text),
+            owner.body(content),
             None,
             lineage=lineage,
         )
@@ -506,8 +507,16 @@ class PluginArtifactTransaction(_Reads):
         return tuple(desired.values())
 
 
+async def _nothing(connection: AsyncConnection) -> None:
+    return None
+
+
 class PluginArtifactWriter(_Reads):
-    """Committed reads plus the invocation's single write transaction."""
+    """Committed reads plus one write transaction.
+
+    Inside an invocation the transaction also commits the cursor and acknowledgment.
+    The Server uses the same writer for public Artifact changes, with no window.
+    """
 
     def __init__(
         self,
@@ -515,16 +524,18 @@ class PluginArtifactWriter(_Reads):
         database: Any,
         scope_id: str,
         family: str,
-        window_sources: frozenset[tuple[str, str]],
         sources: SourceRepository,
-        begin: Callable[[AsyncConnection], Awaitable[None]],
-        complete: Callable[[AsyncConnection], Awaitable[None]],
-        transaction_timeout_seconds: float,
+        search_fields: tuple[str, ...] | None = None,
+        window_sources: frozenset[tuple[str, str]] = frozenset(),
+        begin: Callable[[AsyncConnection], Awaitable[None]] = _nothing,
+        complete: Callable[[AsyncConnection], Awaitable[None]] = _nothing,
+        transaction_timeout_seconds: float = 30,
         security: Any = None,
     ) -> None:
         self.database = database
         self.scope_id = scope_id
         self._family = family
+        self.search_fields = search_fields
         self.window_sources = window_sources
         self._begin = begin
         self._complete = complete
@@ -553,6 +564,9 @@ class PluginArtifactWriter(_Reads):
     def family(self) -> str:
         return self._family
 
+    def body(self, content: dict[str, JsonValue]) -> PluginArtifactContent:
+        return PluginArtifactContent(content=content, search_text=search_text(content, self.search_fields))
+
     def stable_id(self, *parts: str) -> str:
         digest = hashlib.sha256()
         for part in (self._family, *parts):
@@ -576,12 +590,34 @@ class PluginArtifactWriter(_Reads):
         self.committed = True
 
 
+async def change_plugin_artifact(
+    database: Any,
+    spec: ArtifactPluginSpec,
+    scope_id: str,
+    operation: Callable[[PluginArtifactTransaction], Awaitable[ResultT]],
+) -> ResultT:
+    """Apply one public change to a plugin Artifact under the rules plugins write with.
+
+    Plugin code is not involved; the plugin sees the new state in its next invocation.
+    """
+
+    writer = PluginArtifactWriter(
+        database=database,
+        scope_id=scope_id,
+        family=spec.family,
+        sources=SourceRepository(BUILTIN_SOURCE_REGISTRY),
+        search_fields=spec.search_fields,
+        transaction_timeout_seconds=spec.transaction_timeout_seconds,
+    )
+    async with writer.transaction() as transaction:
+        return await operation(transaction)
+
+
 def _snapshot(record: ArtifactMergeRecord) -> ArtifactSnapshot:
     artifact, state = record.artifact, record.state
     return ArtifactSnapshot(
         ref=artifact.as_ref(),
         content=artifact.content.content,
-        search_text=artifact.content.search_text,
         lineage=artifact.lineage,
         lifecycle_state=state.lifecycle_state.value,
         merged_into_id=state.merged_into_id,

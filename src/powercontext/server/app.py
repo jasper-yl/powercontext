@@ -416,6 +416,7 @@ from powercontext.http import (
     ArtifactCreated,
     ArtifactFamilyAccessCapability,
     ArtifactHandleBinding,
+    ArtifactLifecycleResult,
     ArtifactPage,
     ArtifactPluginPage,
     ArtifactPluginState,
@@ -423,6 +424,7 @@ from powercontext.http import (
     ArtifactReference,
     ArtifactRevision,
     ArtifactRevisionPage,
+    ArtifactUndoMergeResult,
     BaseArtifactFamily,
     BindArtifactHandleRequest,
     BootstrapContext,
@@ -436,6 +438,7 @@ from powercontext.http import (
     CaptureContentSourceRequest,
     CaptureContentSourceResponse,
     CaptureWorkingNoteRequest,
+    ChangeArtifactLifecycleRequest,
     ChangeArtifactPluginStateRequest,
     ClearScopeBindingRequest,
     ClearScopeBindingResponse,
@@ -474,8 +477,6 @@ from powercontext.http import (
     FlushTopicMemoryResponse,
     GeneratedCandidateResponse,
     GenerateExperienceRequest,
-    GeneratePluginArtifactsRequest,
-    GeneratePluginArtifactsResponse,
     GeneratePromptDemonstrationsRequest,
     GenerateSkillRequest,
     GetCandidateRequest,
@@ -511,6 +512,7 @@ from powercontext.http import (
     ListMemoryChangesResponse,
     ListMemoryEntriesRequest,
     ListMemoryEntriesResponse,
+    ListPluginScopesRequest,
     ListRemoteSkillTargetsRequest,
     ListRemoteSkillTargetsResponse,
     ListScopesRequest,
@@ -519,7 +521,7 @@ from powercontext.http import (
     MemoryEntryAccessSelector,
     MemoryMutationResponse,
     PluginPage,
-    PluginRequestStatus,
+    PluginScopePage,
     PluginState,
     PrepareContextRequest,
     PreparedContext,
@@ -558,6 +560,7 @@ from powercontext.http import (
     RenameRemoteSkillTargetRequest,
     ReplaceAccessBindingRequest,
     ReplaceArtifactRequest,
+    ReplacePluginArtifactRequest,
     ResolveExternalSkillRequest,
     ResolveScopeBindingRequest,
     ResolveScopeSelectionRequest,
@@ -638,6 +641,9 @@ from powercontext.http import (
     AccessSubject as TransportAccessSubject,
 )
 from powercontext.http import (
+    ArtifactLifecycleState as TransportArtifactLifecycleState,
+)
+from powercontext.http import (
     ArtifactPublication as TransportArtifactPublication,
 )
 from powercontext.http import (
@@ -694,6 +700,7 @@ from powercontext.http._generated.operations import (
     BIND_ARTIFACT_HANDLE,
     CAPTURE_CONTENT_SOURCE,
     CAPTURE_WORKING_NOTE,
+    CHANGE_ARTIFACT_LIFECYCLE,
     CHECK_ACCESS,
     CLEAR_SCOPE_BINDING,
     COMMIT_CONNECTOR_CHECKPOINT,
@@ -718,7 +725,6 @@ from powercontext.http._generated.operations import (
     FLUSH_PROFILE,
     FLUSH_TOPIC_MEMORY,
     GENERATE_EXPERIENCE,
-    GENERATE_PLUGIN_ARTIFACTS,
     GENERATE_PROMPT_DEMONSTRATIONS,
     GENERATE_SKILL,
     GET_ACCESS_PRINCIPAL,
@@ -766,6 +772,7 @@ from powercontext.http._generated.operations import (
     LIST_MANAGED_SKILLS,
     LIST_MEMORY_CHANGES,
     LIST_MEMORY_ENTRIES,
+    LIST_PLUGIN_SCOPES,
     LIST_PLUGINS,
     LIST_REMOTE_SKILL_TARGETS,
     LIST_SCOPES,
@@ -814,6 +821,7 @@ from powercontext.http._generated.operations import (
     SET_DEFAULT_SCOPE,
     SET_SCOPE_BINDING,
     SUBMIT_SOURCE_OBSERVATION,
+    UNDO_ARTIFACT_MERGE,
     UNLOAD_ARTIFACT_PLUGIN,
     UNPUBLISH_REMOTE_SKILL,
     UPDATE_SCOPE,
@@ -1496,7 +1504,9 @@ def create_app(
     _add_route(app, GET_CAPABILITIES, get_capabilities)
     _add_route(app, LIST_PLUGINS, list_plugins)
     _add_route(app, GET_PLUGIN, get_plugin)
-    _add_route(app, GENERATE_PLUGIN_ARTIFACTS, generate_plugin_artifacts)
+    _add_route(app, LIST_PLUGIN_SCOPES, list_plugin_scopes)
+    _add_route(app, CHANGE_ARTIFACT_LIFECYCLE, change_artifact_lifecycle)
+    _add_route(app, UNDO_ARTIFACT_MERGE, undo_artifact_merge)
     _add_route(app, LIST_ARTIFACT_PLUGINS, list_artifact_plugins)
     _add_route(app, ENABLE_ALL_ARTIFACT_PLUGINS, enable_all_artifact_plugins)
     _add_route(app, GET_ARTIFACT_PLUGIN, get_artifact_plugin)
@@ -1814,14 +1824,62 @@ async def get_plugin(
     return _require_plugin_manager(http_request).get(name)
 
 
-async def generate_plugin_artifacts(
+def _list_plugin_scopes_query(
+    http_request: Request,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    cursor: Annotated[str | None, Query(min_length=1, max_length=256)] = None,
+) -> ListPluginScopesRequest:
+    _require_strict_query(http_request, {"limit", "cursor"})
+    return ListPluginScopesRequest(limit=limit, cursor=cursor)
+
+
+async def list_plugin_scopes(
+    name: Annotated[str, Path(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9-]*$")],
+    request: Annotated[ListPluginScopesRequest, Depends(_list_plugin_scopes_query)],
+    http_request: Request,
+) -> PluginScopePage:
+    return await _require_plugin_manager(http_request).scopes(name, cursor=request.cursor, limit=request.limit or 50)
+
+
+def _plugin_reference(ref: Any) -> ArtifactReference:
+    return ArtifactReference(family=ref.family, artifact_id=ref.artifact_id, revision=ref.revision)
+
+
+async def change_artifact_lifecycle(
     scope_id: _ScopePathId,
     family: Annotated[str, Path(min_length=1, max_length=128, pattern=r"^[a-z][a-z0-9-]*$")],
-    request: GeneratePluginArtifactsRequest,
+    artifact_id: Annotated[str, Path(min_length=1, max_length=128, pattern=r"^[\x21-\x7E]+$")],
+    request: ChangeArtifactLifecycleRequest,
     http_request: Request,
-) -> GeneratePluginArtifactsResponse:
-    sequence = await _require_plugin_manager(http_request).request(scope_id, family, request.params)
-    return GeneratePluginArtifactsResponse(status=PluginRequestStatus.ACCEPTED, request_sequence=sequence)
+) -> ArtifactLifecycleResult:
+    snapshot = await _require_plugin_manager(http_request).change(
+        scope_id,
+        family,
+        lambda tx: tx.set_lifecycle(
+            artifact_id, request.state.value, replacement_artifact_id=request.replacement_artifact_id
+        ),
+    )
+    return ArtifactLifecycleResult(
+        artifact=_plugin_reference(snapshot.ref),
+        lifecycle_state=TransportArtifactLifecycleState(snapshot.lifecycle_state),
+        merged_into_id=snapshot.merged_into_id,
+        replacement_artifact_id=snapshot.replacement_artifact_id,
+    )
+
+
+async def undo_artifact_merge(
+    scope_id: _ScopePathId,
+    family: Annotated[str, Path(min_length=1, max_length=128, pattern=r"^[a-z][a-z0-9-]*$")],
+    artifact_id: Annotated[str, Path(min_length=1, max_length=128, pattern=r"^[\x21-\x7E]+$")],
+    http_request: Request,
+) -> ArtifactUndoMergeResult:
+    outcome = await _require_plugin_manager(http_request).change(
+        scope_id, family, lambda tx: tx.undo_merge(artifact_id)
+    )
+    return ArtifactUndoMergeResult(
+        restored=[_plugin_reference(ref) for ref in outcome.restore],
+        retired=[_plugin_reference(ref) for ref in outcome.retire],
+    )
 
 
 async def get_capabilities(request: Request) -> Capabilities:
@@ -3117,7 +3175,7 @@ async def get_artifact(
 
 async def replace_artifact(
     scope_id: Annotated[str, Path(min_length=1, max_length=256, pattern=r".*\S.*")],
-    family: Annotated[BaseArtifactFamily, Path()],
+    family_name: Annotated[str, Path(alias="family", min_length=1, max_length=128, pattern=r"^[a-z][a-z0-9-]*$")],
     artifact_id: Annotated[str, Path(min_length=1, max_length=128, pattern=r"^[\x21-\x7E]+$")],
     request: ReplaceArtifactRequest,
     response: Response,
@@ -3125,6 +3183,16 @@ async def replace_artifact(
     application: Annotated[ServerApplication, Depends(_require_application)],
     if_match: Annotated[str | None, Header(alias="If-Match")] = None,
 ) -> ArtifactRevision:
+    from powercontext.builtin.plugins.families import is_plugin_family
+
+    if is_plugin_family(family_name):
+        return await _replace_plugin_artifact(
+            scope_id, family_name, artifact_id, response, http_request, application, if_match
+        )
+    try:
+        family = BaseArtifactFamily(family_name)
+    except ValueError:
+        raise BaseValueNotFoundError("artifact_family", family_name) from None
     if family.value == "memory":
         raise BaseOperationNotSupportedError("artifact_family", "memory", "collection writes")
     expected_etag = _require_artifact_etag(if_match)
@@ -3148,6 +3216,33 @@ async def replace_artifact(
         previous_entry_ids=frozenset(),
         operation=REPLACE_ARTIFACT.operation_id,
     )
+    response.headers["ETag"] = _artifact_etag(result.revision)
+    return _artifact_revision_response(result)
+
+
+async def _replace_plugin_artifact(
+    scope_id: str,
+    family: str,
+    artifact_id: str,
+    response: Response,
+    http_request: Request,
+    application: ServerApplication,
+    if_match: str | None,
+) -> ArtifactRevision:
+    expected_etag = _require_artifact_etag(if_match)
+    # Plugin content is opaque: store the submitted JSON, not a built-in model's re-serialization.
+    body = await http_request.json()
+    content = body.get("content") if isinstance(body, dict) else None
+    if not isinstance(content, dict) or set(body) != {"content"}:
+        raise InvalidBaseAccessRequestError("content", "must be the complete plugin content object")
+    scoped = application.records.for_scope(scope_id)
+    current = await scoped.get_artifact(family, artifact_id)
+    if expected_etag != _artifact_etag(current.revision):
+        raise ArtifactRevisionPreconditionError(expected_etag, _artifact_etag(current.revision))
+    await _require_plugin_manager(http_request).change(
+        scope_id, family, lambda tx: tx.put(artifact_id, content=content, expected_revision=current.revision)
+    )
+    result = await scoped.get_artifact(family, artifact_id)
     response.headers["ETag"] = _artifact_etag(result.revision)
     return _artifact_revision_response(result)
 
@@ -3241,7 +3336,10 @@ def _artifact_collection_item_response(value: RuntimeArtifactCollectionItem) -> 
 
 
 def _artifact_write(value: CreateArtifactRequest | ReplaceArtifactRequest) -> RuntimeArtifactWrite:
-    content = value.root.content
+    root = value.root
+    if isinstance(root, ReplacePluginArtifactRequest):
+        raise InvalidBaseAccessRequestError("content", "does not match a built-in Artifact contract")
+    content = root.content
     if isinstance(content, TransportHandoffContent):
         content = mapping.runtime_handoff_content(content)
     return RuntimeArtifactWrite(
@@ -5425,6 +5523,19 @@ def _path_artifact_write_access(
     payload: Mapping[str, Any],
     _deployment_id: str,
 ) -> tuple[tuple[AccessAction, ResourceRef], ...]:
+    from powercontext.builtin.plugins.families import is_plugin_family
+
+    if is_plugin_family(family := _path_artifact_read_family(payload)):
+        return (
+            (
+                AccessAction.ARTIFACT_WRITE,
+                ResourceRef.artifact(
+                    _nested_request_value(payload, "scope_id"),
+                    family=family,
+                    artifact_id=_nested_request_value(payload, "artifact_id"),
+                ),
+            ),
+        )
     family = _path_artifact_family(payload)
     if family in {BaseArtifactFamily.PROMPT.value, "topic-memory"}:
         # Scope-owned configuration and knowledge cannot use retained Artifact ownership.

@@ -15,6 +15,7 @@
 """Plugin writes commit with the consumption cursor, or not at all."""
 
 import asyncio
+import json
 from uuid import uuid4
 
 import pytest
@@ -39,10 +40,7 @@ class Reports:
             for source in request.sources:
                 text = source.projection["content"]
                 ref = await tx.put(
-                    writer.stable_id(source.ref.source_id),
-                    content={"text": text},
-                    search_text=text,
-                    source_refs=[source.ref],
+                    writer.stable_id(source.ref.source_id), content={"text": text}, source_refs=[source.ref]
                 )
                 summary = await tx.get("summary")
                 count = 0 if summary is None else summary.content["count"]
@@ -53,7 +51,7 @@ class Reports:
                 raise RuntimeError("model output rejected")
 
 
-async def create(ctx, config):
+async def create(ctx):
     return Reports(ctx)
 """
 
@@ -104,7 +102,10 @@ def test_writes_commit_with_cursor_and_failures_leave_both_unchanged(tmp_path, r
     asyncio.run(scenario())
 
 
+# Each Source carries a JSON list of writer operations, so one window drives one transaction.
 LIFECYCLE = """
+import json
+
 from powercontext.plugins import ArtifactWriter, GenerateRequest
 
 
@@ -112,13 +113,13 @@ class Lifecycle:
     async def generate(self, request: GenerateRequest, writer: ArtifactWriter) -> None:
         results = {}
         async with writer.transaction() as tx:
-            for command in request.requests:
+            commands = [item for source in request.sources for item in json.loads(source.projection["content"])]
+            for command in commands:
                 op = command["op"]
                 if op == "put":
-                    await tx.put(command["id"], content={"text": command["text"]}, search_text=command["text"])
+                    await tx.put(command["id"], content={"text": command["text"]})
                 elif op == "merge":
-                    await tx.merge(command["inputs"], into=command["into"], content={"text": command["text"]},
-                                   search_text=command["text"])
+                    await tx.merge(command["inputs"], into=command["into"], content={"text": command["text"]})
                 elif op == "undo":
                     await tx.undo_merge(command["id"])
                 elif op == "lifecycle":
@@ -136,21 +137,24 @@ class Lifecycle:
                 await tx.put("search-log", content={"results": results})
 
 
-async def create(ctx, config):
+async def create(ctx):
     return Lifecycle()
 """
 
 
 def test_writer_covers_shared_lifecycle_merge_and_search(tmp_path, runtime):
-    directory = write_plugin(tmp_path / "plugins", "facts", LIFECYCLE)
-
-    async def run(database, scope, *commands):
-        await invoke(database, directory, scope, requests=commands)
+    # Only the text field is indexed, so the search log itself never matches a query.
+    directory = write_plugin(tmp_path / "plugins", "facts", LIFECYCLE, search_fields=("text",))
 
     async def scenario():
         async with open_builtin_contexts(runtime) as contexts:
             database = contexts.database
             scope = await _scope(contexts)
+
+            async def run(database, scope, *commands):
+                await contexts.records.create_source(scope, "content", json.dumps(commands))
+                await invoke(database, directory, scope)
+
             await run(
                 database,
                 scope,

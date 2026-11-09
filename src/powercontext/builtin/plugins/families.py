@@ -66,6 +66,14 @@ class PluginArtifactContent(BaseModel):
     search_text: str | None = None
 
 
+def search_text(content: dict[str, JsonValue], fields: tuple[str, ...] | None) -> str | None:
+    """Derive the indexed text from the declared top-level fields, the same for every writer."""
+
+    names = sorted(content) if fields is None else fields
+    parts = [value for name in names if isinstance(value := content.get(name), str) and value.strip()]
+    return "\n".join(parts) or None
+
+
 class PluginContentView(RootModel[dict[str, JsonValue]]):
     """The public shape of a plugin revision: the plugin's content only."""
 

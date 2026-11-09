@@ -14,27 +14,127 @@
 
 """Interfaces that plugins implement and that PC Server calls when it needs them.
 
-An Artifact plugin implements one method, ``generate(request, writer)``. Slow work
-such as model calls runs outside the writer; Artifact writes run inside one short
-``async with writer.transaction()`` block, which core commits together with the
+A plugin directory holds ``plugin.py``, which assigns an ``ArtifactPlugin`` declaration
+to ``plugin``. The declaration tells core which Sources to deliver and when; its
+``create`` factory returns an object with one method, ``generate(request, writer)``.
+Slow work such as model calls runs outside the writer; Artifact writes run inside one
+short ``async with writer.transaction()`` block, which core commits together with the
 consumption cursor and the invocation acknowledgment.
+
+Callers never call plugins. They write Sources and read or change Artifacts through
+the existing Source and Artifact APIs.
 """
 
 from __future__ import annotations
 
 import logging
-from collections.abc import Collection, Sequence
+from collections.abc import Awaitable, Callable, Collection, Sequence
 from contextlib import AbstractAsyncContextManager, AsyncExitStack
+from datetime import timedelta
 from pathlib import Path
-from typing import Literal, Protocol, TypeVar
+from typing import Annotated, Literal, Protocol, TypeVar
 
-from pydantic import BaseModel, ConfigDict, Field, JsonValue
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
 
 from powercontext.artifacts import ArtifactLineage, ArtifactRef
-from powercontext.sources import SourceRef
+from powercontext.sources import SourceProjectionKey, SourceRef
 
 ResourceT = TypeVar("ResourceT")
 LifecycleState = Literal["active", "deprecated", "retired"]
+BUILTIN_FAMILIES = frozenset({
+    "memory",
+    "atomic-memory",
+    "experience",
+    "skill",
+    "handoff",
+    "profile",
+    "prompt",
+    "topic-memory",
+})
+
+
+class Interval(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
+
+    seconds: float = Field(gt=0)
+
+    @field_validator("seconds")
+    @classmethod
+    def representable(cls, value: float) -> float:
+        if timedelta(seconds=value).total_seconds() <= 0:
+            raise ValueError("seconds must be at least one microsecond")  # noqa: TRY003
+        return value
+
+
+class Cron(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    expression: str = Field(min_length=1)
+    timezone: str = "Asia/Shanghai"
+
+
+class Inputs(BaseModel):
+    """The Sources delivered to ``generate`` and the Projection each one arrives in."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    source_types: tuple[Annotated[str, Field(min_length=1)], ...] = Field(min_length=1)
+    projection: str = Field(pattern=r"^[^@\s]+@[^@\s]+$")
+    max_sources: int = Field(default=50, ge=1, le=1000)
+
+    @property
+    def projection_key(self) -> SourceProjectionKey:
+        name, version = self.projection.rsplit("@", 1)
+        return SourceProjectionKey(name=name, version=version)
+
+
+class ArtifactPluginSpec(BaseModel):
+    """The data part of a declaration: what core needs before it runs plugin code."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
+
+    family: str = Field(pattern=r"^[a-z][a-z0-9-]{0,127}$")
+    inputs: Inputs | None = None
+    schedule: Interval | Cron | None = None
+    on_sources: bool = False
+    scopes: tuple[Annotated[str, Field(min_length=1, max_length=256)], ...] | None = Field(
+        default=None, min_length=1, max_length=1000
+    )
+    # Top-level content fields whose text core indexes for search; None indexes every string field.
+    search_fields: tuple[Annotated[str, Field(min_length=1)], ...] | None = None
+    max_workers: int = Field(default=1, ge=1)
+    timeout_seconds: float = Field(default=300, gt=0)
+    transaction_timeout_seconds: float = Field(default=30, gt=0)
+
+    @field_validator("family")
+    @classmethod
+    def not_builtin(cls, value: str) -> str:
+        if value in BUILTIN_FAMILIES:
+            raise ValueError("family must not reuse a built-in Artifact family")  # noqa: TRY003
+        return value
+
+    @field_validator("scopes")
+    @classmethod
+    def unique_scopes(cls, value: tuple[str, ...] | None) -> tuple[str, ...] | None:
+        if value is not None and len(set(value)) != len(value):
+            raise ValueError("Scope IDs must be unique")  # noqa: TRY003
+        return None if value is None else tuple(sorted(value))
+
+    @model_validator(mode="after")
+    def callable_somehow(self) -> ArtifactPluginSpec:
+        if self.schedule is None and not self.on_sources:
+            raise ValueError("declare a schedule, on_sources, or both")  # noqa: TRY003
+        if self.on_sources and self.inputs is None:
+            raise ValueError("on_sources requires inputs")  # noqa: TRY003
+        if isinstance(self.schedule, Cron) and (self.on_sources or self.inputs is None):
+            # The Supervisor admits one interval or one cron per binding, and cron plugins
+            # without inputs have no dirty work to admit.
+            raise ValueError("cron schedules require inputs and cannot be combined with on_sources")  # noqa: TRY003
+        if self.inputs is None and self.scopes is None:
+            raise ValueError("plugins without inputs must list scopes explicitly")  # noqa: TRY003
+        if self.transaction_timeout_seconds > self.timeout_seconds:
+            raise ValueError("transaction_timeout_seconds must not exceed timeout_seconds")  # noqa: TRY003
+        return self
 
 
 class GenerationSource(BaseModel):
@@ -53,10 +153,8 @@ class GenerateRequest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     scope_id: str
-    reason: Literal["schedule", "sources", "manual"]
+    reason: Literal["schedule", "sources"]
     sources: tuple[GenerationSource, ...] = ()
-    # Every manual request accepted since the last committed invocation, in order.
-    requests: tuple[JsonValue, ...] = ()
 
 
 class ArtifactSnapshot(BaseModel):
@@ -66,7 +164,6 @@ class ArtifactSnapshot(BaseModel):
 
     ref: ArtifactRef
     content: dict[str, JsonValue]
-    search_text: str | None = None
     lineage: ArtifactLineage
     lifecycle_state: LifecycleState
     merged_into_id: str | None = None
@@ -143,7 +240,6 @@ class ArtifactTransaction(ArtifactReads, Protocol):
         /,
         *,
         content: dict[str, JsonValue],
-        search_text: str | None = None,
         source_refs: Sequence[SourceRef] = (),
         artifact_refs: Sequence[ArtifactRef] = (),
         expected_revision: int | None = None,
@@ -162,7 +258,6 @@ class ArtifactTransaction(ArtifactReads, Protocol):
         *,
         into: str,
         content: dict[str, JsonValue],
-        search_text: str | None = None,
         source_refs: Sequence[SourceRef] = (),
         artifact_refs: Sequence[ArtifactRef] = (),
     ) -> ArtifactSnapshot: ...
@@ -191,15 +286,29 @@ class ArtifactGenerator(Protocol):
     async def generate(self, request: GenerateRequest, writer: ArtifactWriter, /) -> None: ...
 
 
+class ArtifactPlugin(ArtifactPluginSpec):
+    """The declaration ``plugin.py`` assigns to ``plugin``; the plugin name is its directory name."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    # Called once per invocation inside the Worker; read deployment settings from the environment here.
+    create: Callable[[PluginContext], Awaitable[ArtifactGenerator]] = Field(exclude=True)
+
+
 __all__ = [
     "ArtifactGenerator",
     "ArtifactPage",
+    "ArtifactPlugin",
+    "ArtifactPluginSpec",
     "ArtifactReads",
     "ArtifactSnapshot",
     "ArtifactTransaction",
     "ArtifactWriter",
+    "Cron",
     "GenerateRequest",
     "GenerationSource",
+    "Inputs",
+    "Interval",
     "LifecycleState",
     "PluginContext",
     "UndoMergePreview",

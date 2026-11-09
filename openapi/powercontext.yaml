@@ -2030,8 +2030,8 @@ paths:
       tags: [plugins]
       summary: List loaded plugins
       description: >-
-        Lists the plugins checked at Server startup, whether each loaded or failed, and the calls made since the
-        process started. Plugins have no persisted lifecycle state; change the plugin directory and restart Server.
+        Lists the plugins checked at Server startup, whether each loaded or failed, and what each one declares.
+        Plugins have no persisted lifecycle state; change the plugin directory and restart Server.
       operationId: list_plugins
       x-powercontext-access: {action: server.admin, resource: {type: server}}
       responses:
@@ -2053,7 +2053,7 @@ paths:
         - {name: name, in: path, required: true, schema: {type: string, minLength: 1, maxLength: 64, pattern: '^[a-z][a-z0-9-]*$'}}
       responses:
         "200":
-          description: The plugin's startup check result, without configuration values.
+          description: The plugin's startup check result and declaration.
           content:
             application/json:
               schema: {$ref: '#/components/schemas/PluginState'}
@@ -2061,31 +2061,81 @@ paths:
         "403": {$ref: '#/components/responses/Forbidden'}
         "404": {$ref: '#/components/responses/NotFound'}
         "503": {$ref: '#/components/responses/Unavailable'}
-  /v1/scopes/{scope_id}/artifacts/{family}/generate:
-    post:
+  /v1/plugins/{name}/scopes:
+    get:
       tags: [plugins]
-      summary: Request generation by an Artifact plugin
+      summary: List a plugin's progress per Scope
       description: >-
-        Persists the request and returns before the plugin runs. The plugin receives every request accepted since its
-        last committed invocation, in order, together with any unconsumed Sources. Only plugin families that allow manual
-        triggers accept requests.
-      operationId: generate_plugin_artifacts
-      x-powercontext-access: {action: scope.contribute, resource: {type: scope, scope-id-from: scope_id}}
+        Reads the plugin's pending work and consumption cursor in each Scope from the database, so every Server role
+        returns the same answer. Call outcomes are reported through logs and metrics, not here.
+      operationId: list_plugin_scopes
+      x-powercontext-access: {action: server.admin, resource: {type: server}}
+      parameters:
+        - {name: name, in: path, required: true, schema: {type: string, minLength: 1, maxLength: 64, pattern: '^[a-z][a-z0-9-]*$'}}
+        - {name: cursor, in: query, required: false, schema: {type: string, minLength: 1, maxLength: 256}}
+        - {name: limit, in: query, required: false, schema: {type: integer, minimum: 1, maximum: 200, default: 50}}
+      responses:
+        "200":
+          description: Scopes the plugin has been asked to process, ordered by Scope ID.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/PluginScopePage'}
+        "401": {$ref: '#/components/responses/Unauthorized'}
+        "403": {$ref: '#/components/responses/Forbidden'}
+        "404": {$ref: '#/components/responses/NotFound'}
+        "503": {$ref: '#/components/responses/Unavailable'}
+  /v1/scopes/{scope_id}/artifacts/{family}/{artifact_id}/lifecycle:
+    post:
+      tags: [artifacts]
+      summary: Change an Artifact's lifecycle state
+      description: >-
+        Forget (deprecated), retire, or restore (active) a plugin Artifact without changing its content revision.
+        Restoring an input frozen by a merge undoes that merge as one group, as built-in restoration does. Built-in
+        families keep their own lifecycle operations.
+      operationId: change_artifact_lifecycle
       x-powercontext-scope-mode: current
+      x-powercontext-access: {resolver: path_artifact_write_access}
       parameters:
         - {name: scope_id, in: path, required: true, schema: {type: string, minLength: 1, maxLength: 256, pattern: '.*\S.*'}}
-        - {name: family, in: path, required: true, schema: {type: string, minLength: 1, maxLength: 128, pattern: '^[a-z][a-z0-9-]*$'}}
+        - {name: family, in: path, required: true, schema: {$ref: '#/components/schemas/ArtifactReadFamily'}}
+        - {name: artifact_id, in: path, required: true, schema: {type: string, minLength: 1, maxLength: 128, pattern: '^[\x21-\x7E]+$'}}
       requestBody:
         required: true
         content:
           application/json:
-            schema: {$ref: '#/components/schemas/GeneratePluginArtifactsRequest'}
+            schema: {$ref: '#/components/schemas/ChangeArtifactLifecycleRequest'}
       responses:
-        "202":
-          description: The request is durable and an invocation is accepted.
+        "200":
+          description: The Artifact's lifecycle after the change.
           content:
             application/json:
-              schema: {$ref: '#/components/schemas/GeneratePluginArtifactsResponse'}
+              schema: {$ref: '#/components/schemas/ArtifactLifecycleResult'}
+        "401": {$ref: '#/components/responses/Unauthorized'}
+        "403": {$ref: '#/components/responses/Forbidden'}
+        "404": {$ref: '#/components/responses/NotFound'}
+        "409": {$ref: '#/components/responses/Conflict'}
+        "422": {$ref: '#/components/responses/InvalidRequest'}
+        "503": {$ref: '#/components/responses/Unavailable'}
+  /v1/scopes/{scope_id}/artifacts/{family}/{artifact_id}/undo-merge:
+    post:
+      tags: [artifacts]
+      summary: Undo the merge that produced an Artifact
+      description: >-
+        Restores the merge inputs and retires the merge result atomically. Only plugin families accept this
+        operation; built-in families keep their own restoration operations.
+      operationId: undo_artifact_merge
+      x-powercontext-scope-mode: current
+      x-powercontext-access: {resolver: path_artifact_write_access}
+      parameters:
+        - {name: scope_id, in: path, required: true, schema: {type: string, minLength: 1, maxLength: 256, pattern: '.*\S.*'}}
+        - {name: family, in: path, required: true, schema: {$ref: '#/components/schemas/ArtifactReadFamily'}}
+        - {name: artifact_id, in: path, required: true, schema: {type: string, minLength: 1, maxLength: 128, pattern: '^[\x21-\x7E]+$'}}
+      responses:
+        "200":
+          description: The revisions restored and retired by the undo.
+          content:
+            application/json:
+              schema: {$ref: '#/components/schemas/ArtifactUndoMergeResult'}
         "401": {$ref: '#/components/responses/Unauthorized'}
         "403": {$ref: '#/components/responses/Forbidden'}
         "404": {$ref: '#/components/responses/NotFound'}
@@ -4563,6 +4613,7 @@ paths:
         Handoff, or Topic Memory, set restored_from_revision and reason. The server checks that the submitted
         canonical content matches that revision and differs from the current head, then commits a new revision.
         Atomic Memory replacement rejects both fields; restore Atomic Memory through its restoration flow.
+        Plugin families accept their own content unchanged; the plugin's next invocation sees the new revision.
       operationId: replace_artifact
       x-powercontext-scope-mode: current
       x-powercontext-access: {resolver: path_artifact_write_access}
@@ -4578,9 +4629,7 @@ paths:
         - name: family
           in: path
           required: true
-          schema:
-            type: string
-            enum: [memory, atomic-memory, experience, skill, handoff, prompt, topic-memory, profile]
+          schema: {$ref: '#/components/schemas/ArtifactReadFamily'}
         - name: artifact_id
           in: path
           required: true
@@ -8017,13 +8066,11 @@ components:
         expected_generation: {type: integer, minimum: 1}
     PluginKind: {type: string, enum: [artifact]}
     PluginLoadStatus: {type: string, enum: [loaded, failed]}
-    PluginTrigger: {type: string, enum: [schedule, sources, manual]}
-    PluginCallOutcome: {type: string, enum: [succeeded, failed]}
-    PluginRequestStatus: {type: string, enum: [accepted]}
+    PluginTrigger: {type: string, enum: [schedule, sources]}
     PluginState:
       type: object
       additionalProperties: false
-      required: [name, kind, status, error, family, binding_name, scopes, triggers, last_outcome, last_finished_at]
+      required: [name, kind, status, error, family, binding_name, scopes, source_types, triggers]
       properties:
         name: {type: string}
         kind: {$ref: '#/components/schemas/PluginKind'}
@@ -8032,32 +8079,84 @@ components:
         family: {type: string, nullable: true}
         binding_name: {type: string, nullable: true}
         scopes: {type: array, nullable: true, items: {type: string}}
-        triggers: {type: array, items: {$ref: '#/components/schemas/PluginTrigger'}}
-        last_outcome:
-          description: Latest call since process start.
+        source_types:
+          type: array
           nullable: true
-          allOf: [{$ref: '#/components/schemas/PluginCallOutcome'}]
-        last_finished_at: {type: string, format: date-time, nullable: true}
+          items: {type: string}
+          description: Source types delivered to the plugin; null when it consumes no Sources.
+        triggers: {type: array, items: {$ref: '#/components/schemas/PluginTrigger'}}
     PluginPage:
       type: object
       additionalProperties: false
       required: [items]
       properties:
         items: {type: array, items: {$ref: '#/components/schemas/PluginState'}}
-    GeneratePluginArtifactsRequest:
+    PluginScopeState:
       type: object
       additionalProperties: false
+      required: [scope_id, pending, consumed_position, source_position]
       properties:
-        params:
-          description: Plugin-defined request value delivered unchanged to the plugin.
+        scope_id: {type: string}
+        pending: {type: boolean, description: New Sources or a schedule request are waiting for an invocation.}
+        consumed_position:
+          type: integer
+          minimum: 0
           nullable: true
-    GeneratePluginArtifactsResponse:
+          description: Source journal position the plugin has consumed through; null when it consumes no Sources.
+        source_position:
+          type: integer
+          minimum: 0
+          nullable: true
+          description: Latest Source journal position in the Scope, of any Source type.
+    ListPluginScopesRequest:
       type: object
       additionalProperties: false
-      required: [status, request_sequence]
       properties:
-        status: {$ref: '#/components/schemas/PluginRequestStatus'}
-        request_sequence: {type: integer, minimum: 1}
+        cursor: {type: string, minLength: 1, maxLength: 256}
+        limit: {type: integer, minimum: 1, maximum: 200, default: 50}
+    PluginScopePage:
+      type: object
+      additionalProperties: false
+      required: [items, next_cursor]
+      properties:
+        items: {type: array, items: {$ref: '#/components/schemas/PluginScopeState'}}
+        next_cursor: {type: string, nullable: true}
+    ArtifactLifecycleState: {type: string, enum: [active, deprecated, retired]}
+    ChangeArtifactLifecycleRequest:
+      type: object
+      additionalProperties: false
+      required: [state]
+      properties:
+        state: {$ref: '#/components/schemas/ArtifactLifecycleState'}
+        replacement_artifact_id:
+          type: string
+          minLength: 1
+          maxLength: 128
+          nullable: true
+          description: Artifact that supersedes this one when deprecating.
+    ArtifactLifecycleResult:
+      type: object
+      additionalProperties: false
+      required: [artifact, lifecycle_state, merged_into_id, replacement_artifact_id]
+      properties:
+        artifact: {$ref: '#/components/schemas/ArtifactReference'}
+        lifecycle_state: {$ref: '#/components/schemas/ArtifactLifecycleState'}
+        merged_into_id: {type: string, nullable: true}
+        replacement_artifact_id: {type: string, nullable: true}
+    ArtifactUndoMergeResult:
+      type: object
+      additionalProperties: false
+      required: [restored, retired]
+      properties:
+        restored: {type: array, items: {$ref: '#/components/schemas/ArtifactReference'}}
+        retired: {type: array, items: {$ref: '#/components/schemas/ArtifactReference'}}
+    ReplacePluginArtifactRequest:
+      type: object
+      additionalProperties: false
+      required: [content]
+      description: Complete content of a plugin Artifact; core stores it unchanged and indexes the declared fields.
+      properties:
+        content: {type: object, additionalProperties: true}
     ArtifactPluginState:
       type: object
       additionalProperties: false
@@ -12840,6 +12939,7 @@ components:
         - $ref: "#/components/schemas/ReplaceHandoffArtifactRequest"
         - $ref: "#/components/schemas/ReplacePromptArtifactRequest"
         - $ref: "#/components/schemas/ReplaceProfileArtifactRequest"
+        - $ref: "#/components/schemas/ReplacePluginArtifactRequest"
     ReplacePromptArtifactRequest:
       type: object
       additionalProperties: false
