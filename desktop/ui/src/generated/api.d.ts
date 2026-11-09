@@ -983,6 +983,143 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/v1/plugins": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List loaded plugins
+         * @description Lists the plugins checked at Server startup, whether each loaded or failed, and what each one declares. Plugins have no persisted lifecycle state; change the plugin directory and restart Server.
+         */
+        get: operations["list_plugins"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/plugins/{name}": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /** Get one loaded plugin */
+        get: operations["get_plugin"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/plugins/{name}/scopes": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * List a plugin's progress per Scope
+         * @description Reads the plugin's pending work and consumption cursor in each Scope from the database, so every Server role returns the same answer. Call outcomes are reported through logs and metrics, not here.
+         */
+        get: operations["list_plugin_scopes"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/scopes/{scope_id}/artifacts/{family}/merges": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Merge exact current Artifacts into a new Artifact
+         * @description Freezes every input into a new result Artifact in one transaction. Available for every Family registered with the shared merge service, including plugin families; other families return 422. The caller needs write access to each input.
+         */
+        post: operations["merge_artifacts"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/scopes/{scope_id}/artifacts/{family}/{artifact_id}/governance": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * Read an Artifact's current governance state
+         * @description Returns the lifecycle state, state version and merge target that forget, merge and restoration check. Available for every Family registered with the shared merge service.
+         */
+        get: operations["get_artifact_governance"];
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/scopes/{scope_id}/artifacts/{family}/{artifact_id}/forget": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Forget one Artifact without changing its content revision
+         * @description Deprecates the exact current Artifact without a replacement so it leaves search; restoration brings it back. Available for every Family registered with the shared merge service.
+         */
+        post: operations["forget_artifact"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
+    "/v1/scopes/{scope_id}/artifacts/{family}/{artifact_id}/restorations": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /**
+         * Restore an Artifact or undo the merge that produced it
+         * @description `restore` reactivates the Artifact, optionally at an earlier content revision, and undoes the merges that froze it. `undo_merge` restores a merge result's inputs and retires the result. Each runs as one group. Available for every Family registered with the shared merge service.
+         */
+        post: operations["restore_artifact"];
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/v1/scopes/{scope_id}/artifacts/{family}/search": {
         parameters: {
             query?: never;
@@ -2120,7 +2257,7 @@ export interface paths {
         get: operations["get_artifact"];
         /**
          * Replace the current Artifact head
-         * @description Commit a complete next revision when If-Match identifies the current head. Replacing a Prompt requires current scope.admin authority, including switching to Auto and restoring an earlier revision. Artifact ownership does not authorize Prompt replacement after Scope role revocation. Topic Memory replacement also requires scope.admin and preserves independently versioned tags. Complete title, summary, and detail text replaces the head without semantic generation. Profile replacement uses the same conditional write. To roll back Profile, Prompt, Experience, Skill, Handoff, or Topic Memory, set restored_from_revision and reason. The server checks that the submitted canonical content matches that revision and differs from the current head, then commits a new revision. Atomic Memory replacement rejects both fields; restore Atomic Memory through its restoration flow.
+         * @description Commit a complete next revision when If-Match identifies the current head. Replacing a Prompt requires current scope.admin authority, including switching to Auto and restoring an earlier revision. Artifact ownership does not authorize Prompt replacement after Scope role revocation. Topic Memory replacement also requires scope.admin and preserves independently versioned tags. Complete title, summary, and detail text replaces the head without semantic generation. Profile replacement uses the same conditional write. To roll back Profile, Prompt, Experience, Skill, Handoff, or Topic Memory, set restored_from_revision and reason. The server checks that the submitted canonical content matches that revision and differs from the current head, then commits a new revision. Atomic Memory replacement rejects both fields; restore Atomic Memory through its restoration flow. Plugin families accept their own content unchanged; the plugin's next invocation sees the new revision.
          */
         put: operations["replace_artifact"];
         post?: never;
@@ -3406,6 +3543,97 @@ export interface components {
         };
         ChangeArtifactPluginStateRequest: {
             expected_generation: number;
+        };
+        /** @enum {string} */
+        PluginKind: "artifact";
+        /** @enum {string} */
+        PluginLoadStatus: "loaded" | "failed";
+        /** @enum {string} */
+        PluginTrigger: "schedule" | "sources";
+        PluginState: {
+            name: string;
+            kind: components["schemas"]["PluginKind"];
+            status: components["schemas"]["PluginLoadStatus"];
+            /** @description Safe failure category from the startup check. */
+            error: string | null;
+            family: string | null;
+            binding_name: string | null;
+            scopes: string[] | null;
+            /** @description Source types delivered to the plugin; null when it consumes no Sources. */
+            source_types: string[] | null;
+            triggers: components["schemas"]["PluginTrigger"][];
+        };
+        PluginPage: {
+            items: components["schemas"]["PluginState"][];
+        };
+        PluginScopeState: {
+            scope_id: string;
+            /** @description New Sources or a schedule request are waiting for an invocation. */
+            pending: boolean;
+            /** @description Source journal position the plugin has consumed through; null when it consumes no Sources. */
+            consumed_position: number | null;
+            /** @description Latest Source journal position in the Scope, of any Source type. */
+            source_position: number | null;
+        };
+        ListPluginScopesRequest: {
+            cursor?: string;
+            /** @default 50 */
+            limit: number;
+        };
+        PluginScopePage: {
+            items: components["schemas"]["PluginScopeState"][];
+            next_cursor: string | null;
+        };
+        /** @enum {string} */
+        ArtifactLifecycleState: "active" | "deprecated" | "retired";
+        /** @description An exact current Artifact the caller has read; a later change rejects the request. */
+        ArtifactGovernanceInput: {
+            artifact_id: string;
+            revision: number;
+            state_version: number;
+        };
+        MergeArtifactsRequest: {
+            inputs: components["schemas"]["ArtifactGovernanceInput"][];
+            /** @description Complete content of the result in the Family's content shape. */
+            content: {
+                [key: string]: unknown;
+            };
+            source_refs?: components["schemas"]["SourceReference"][];
+            artifact_refs?: components["schemas"]["ArtifactReference"][];
+        };
+        ForgetArtifactRequest: {
+            revision: number;
+            state_version: number;
+        };
+        /** @enum {string} */
+        ArtifactRestorationOperation: "restore" | "undo_merge";
+        RestoreArtifactRequest: {
+            /** @default restore */
+            operation: components["schemas"]["ArtifactRestorationOperation"];
+            /** @description Content revision to restore; omitted restores the current one. Not accepted with undo_merge. */
+            revision?: number | null;
+        };
+        ArtifactGovernanceRecord: {
+            artifact: components["schemas"]["ArtifactReference"];
+            lifecycle_state: components["schemas"]["ArtifactLifecycleState"];
+            state_version: number;
+            merged_into_id: string | null;
+        };
+        ArtifactGovernanceResponse: {
+            changed: boolean;
+            records: components["schemas"]["ArtifactGovernanceRecord"][];
+        };
+        ArtifactRestorationResult: {
+            changed: boolean;
+            restored: components["schemas"]["ArtifactReference"][];
+            retired: components["schemas"]["ArtifactReference"][];
+            undo_merge_results: string[];
+        };
+        /** @description Complete content of a plugin Artifact; core stores it unchanged and indexes the declared fields. */
+        ReplacePluginArtifactRequest: {
+            content: {
+                [key: string]: unknown;
+            };
         };
         ArtifactPluginState: {
             binding_name: string;
@@ -5266,11 +5494,8 @@ export interface components {
             /** @description JSON value persisted by the built-in content Source adapter. Server-reserved payload schemas, including handoff receipts, are rejected and must be created through their dedicated workflow. String values that are empty or whitespace-only are rejected. */
             content: unknown;
         };
-        /**
-         * @description All readable Artifact families support logical tags on persisted Artifacts.
-         * @enum {string}
-         */
-        TaggableArtifactFamily: "memory" | "atomic-memory" | "experience" | "skill" | "handoff" | "profile" | "prompt" | "topic-memory";
+        /** @description A built-in Family or a loaded plugin family; every readable Family supports logical tags on persisted Artifacts. The collection-level memory Family tags entries instead. */
+        TaggableArtifactFamily: string;
         /** @enum {string} */
         TagMatch: "all" | "any";
         /** @enum {string} */
@@ -5344,7 +5569,7 @@ export interface components {
             limit: number;
             cursor?: string | null;
         };
-        ReplaceArtifactRequest: components["schemas"]["ReplaceAtomicMemoryArtifactRequest"] | components["schemas"]["ReplaceTopicMemoryArtifactRequest"] | components["schemas"]["ReplaceMemoryArtifactRequest"] | components["schemas"]["ReplaceExperienceArtifactRequest"] | components["schemas"]["ReplaceSkillArtifactRequest"] | components["schemas"]["ReplaceHandoffArtifactRequest"] | components["schemas"]["ReplacePromptArtifactRequest"] | components["schemas"]["ReplaceProfileArtifactRequest"];
+        ReplaceArtifactRequest: components["schemas"]["ReplaceAtomicMemoryArtifactRequest"] | components["schemas"]["ReplaceTopicMemoryArtifactRequest"] | components["schemas"]["ReplaceMemoryArtifactRequest"] | components["schemas"]["ReplaceExperienceArtifactRequest"] | components["schemas"]["ReplaceSkillArtifactRequest"] | components["schemas"]["ReplaceHandoffArtifactRequest"] | components["schemas"]["ReplacePromptArtifactRequest"] | components["schemas"]["ReplaceProfileArtifactRequest"] | components["schemas"]["ReplacePluginArtifactRequest"];
         ReplacePromptArtifactRequest: {
             content: components["schemas"]["PromptContent"];
             restored_from_revision?: number | null;
@@ -7838,6 +8063,214 @@ export interface operations {
             503: components["responses"]["Unavailable"];
         };
     };
+    list_plugins: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Plugins found in the plugin directory at startup. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PluginPage"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    get_plugin: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The plugin's startup check result and declaration. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PluginState"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    list_plugin_scopes: {
+        parameters: {
+            query?: {
+                cursor?: string;
+                limit?: number;
+            };
+            header?: never;
+            path: {
+                name: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description Scopes the plugin has been asked to process, ordered by Scope ID. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["PluginScopePage"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    merge_artifacts: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                scope_id: string;
+                family: components["schemas"]["ArtifactReadFamily"];
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["MergeArtifactsRequest"];
+            };
+        };
+        responses: {
+            /** @description The merge result and the frozen inputs. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ArtifactGovernanceResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["InvalidRequest"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    get_artifact_governance: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                scope_id: string;
+                family: components["schemas"]["ArtifactReadFamily"];
+                artifact_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody?: never;
+        responses: {
+            /** @description The current governance state. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ArtifactGovernanceRecord"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            422: components["responses"]["InvalidRequest"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    forget_artifact: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                scope_id: string;
+                family: components["schemas"]["ArtifactReadFamily"];
+                artifact_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["ForgetArtifactRequest"];
+            };
+        };
+        responses: {
+            /** @description The Artifact's governance state after forgetting. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ArtifactGovernanceResponse"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["InvalidRequest"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
+    restore_artifact: {
+        parameters: {
+            query?: never;
+            header?: never;
+            path: {
+                scope_id: string;
+                family: components["schemas"]["ArtifactReadFamily"];
+                artifact_id: string;
+            };
+            cookie?: never;
+        };
+        requestBody: {
+            content: {
+                "application/json": components["schemas"]["RestoreArtifactRequest"];
+            };
+        };
+        responses: {
+            /** @description The revisions restored and retired by the operation. */
+            200: {
+                headers: {
+                    [name: string]: unknown;
+                };
+                content: {
+                    "application/json": components["schemas"]["ArtifactRestorationResult"];
+                };
+            };
+            401: components["responses"]["Unauthorized"];
+            403: components["responses"]["Forbidden"];
+            404: components["responses"]["NotFound"];
+            409: components["responses"]["Conflict"];
+            422: components["responses"]["InvalidRequest"];
+            503: components["responses"]["Unavailable"];
+        };
+    };
     search_artifacts: {
         parameters: {
             query?: never;
@@ -9769,7 +10202,7 @@ export interface operations {
             };
             path: {
                 scope_id: string;
-                family: "memory" | "atomic-memory" | "experience" | "skill" | "handoff" | "prompt" | "topic-memory" | "profile";
+                family: components["schemas"]["ArtifactReadFamily"];
                 artifact_id: string;
             };
             cookie?: never;
