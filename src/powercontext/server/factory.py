@@ -104,6 +104,7 @@ from powercontext.server.logging import worker_logging
 from powercontext.server.mcp import mount_mcp
 from powercontext.server.metrics import CONTENT_TYPE_LATEST, HttpMetricsMiddleware, ServerMetrics
 from powercontext.server.middleware import AuthenticationMiddleware
+from powercontext.server.plugins import PluginManager
 from powercontext.server.processing_security import build_worker_security
 from powercontext.server.request_id import HttpRequestIdMiddleware
 from powercontext.server.settings import MissingAuthenticationProviderError, ServerSettings
@@ -340,6 +341,35 @@ def create_server_app(  # noqa: C901
                         runtime_config=config.runtime,
                     )
                 )
+            dispatch_plugins = (
+                config.runtime.artifact_processing_supervisor_mode == "global"
+                and config.runtime.artifact_processing_role != "api"
+            )
+
+            def bind_supervisor(supervisors) -> None:
+                runtime.artifact_processing_supervisor = supervisors
+
+            app.state.plugin_manager = await resources.enter_async_context(
+                PluginManager(
+                    records.database,
+                    config.database,
+                    runtime.artifact_processing_supervisor,
+                    lambda: (
+                        build_worker_security(
+                            resolved,
+                            active_access_control,
+                            legacy_static_principal=static_principal if legacy_static_admin else None,
+                            enabled=True,
+                            injected=configured_access_control is not None,
+                        )
+                        if dispatch_plugins
+                        else None
+                    ),
+                    on_supervisor=bind_supervisor,
+                    plugins_dir=resolved.plugins_dir,
+                    dispatch=dispatch_plugins,
+                )
+            )
             if active_access_control is not None:
                 migrated, unresolved = await runtime._records().migrate_handoff_receipts(
                     active_access_control.committed_receipt_identity,
@@ -391,6 +421,7 @@ def create_server_app(  # noqa: C901
                 _log_lifecycle("server.stopping", "PowerContext Server is stopping")
                 readiness_probe.unbind()
                 app.state.artifact_plugin_manager = None
+                app.state.plugin_manager = None
                 app.state.artifact_declaration_provider = None
                 app.state.artifact_access_refresher = None
                 app.state.application = None

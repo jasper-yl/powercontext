@@ -474,6 +474,8 @@ from powercontext.http import (
     FlushTopicMemoryResponse,
     GeneratedCandidateResponse,
     GenerateExperienceRequest,
+    GeneratePluginArtifactsRequest,
+    GeneratePluginArtifactsResponse,
     GeneratePromptDemonstrationsRequest,
     GenerateSkillRequest,
     GetCandidateRequest,
@@ -516,6 +518,9 @@ from powercontext.http import (
     MemoryCapacity,
     MemoryEntryAccessSelector,
     MemoryMutationResponse,
+    PluginPage,
+    PluginRequestStatus,
+    PluginState,
     PrepareContextRequest,
     PreparedContext,
     PreparedWorkHandoff,
@@ -713,6 +718,7 @@ from powercontext.http._generated.operations import (
     FLUSH_PROFILE,
     FLUSH_TOPIC_MEMORY,
     GENERATE_EXPERIENCE,
+    GENERATE_PLUGIN_ARTIFACTS,
     GENERATE_PROMPT_DEMONSTRATIONS,
     GENERATE_SKILL,
     GET_ACCESS_PRINCIPAL,
@@ -732,6 +738,7 @@ from powercontext.http._generated.operations import (
     GET_MEMORY_CAPACITY,
     GET_MEMORY_ENTRY,
     GET_MEMORY_ENTRY_TAGS,
+    GET_PLUGIN,
     GET_PROFILE_POLICY,
     GET_PROMPT_CONFIGURATION,
     GET_READINESS,
@@ -759,6 +766,7 @@ from powercontext.http._generated.operations import (
     LIST_MANAGED_SKILLS,
     LIST_MEMORY_CHANGES,
     LIST_MEMORY_ENTRIES,
+    LIST_PLUGINS,
     LIST_REMOTE_SKILL_TARGETS,
     LIST_SCOPES,
     LIST_SOURCES,
@@ -881,6 +889,7 @@ from powercontext.server.dream_compatibility import (
     negotiate_dream_contract,
     require_extended_dream,
 )
+from powercontext.server.plugins import PluginManager
 from powercontext.server.request_id import REQUEST_ID_HEADER
 from powercontext.server.tracing import request_id_from_span
 from powercontext.sources import ConnectorBinding as RuntimeConnectorBinding
@@ -1384,6 +1393,7 @@ def create_app(
     )
     app.openapi_version = OPENAPI_VERSION
     app.state.artifact_plugin_manager = None
+    app.state.plugin_manager = None
     app.state.artifact_declaration_provider = None
     app.state.artifact_access_refresher = None
     app.state.application = application
@@ -1484,6 +1494,9 @@ def create_app(
     _add_route(app, GET_READINESS, get_readiness)
     _add_route(app, GET_SERVER_INFO, get_server_info)
     _add_route(app, GET_CAPABILITIES, get_capabilities)
+    _add_route(app, LIST_PLUGINS, list_plugins)
+    _add_route(app, GET_PLUGIN, get_plugin)
+    _add_route(app, GENERATE_PLUGIN_ARTIFACTS, generate_plugin_artifacts)
     _add_route(app, LIST_ARTIFACT_PLUGINS, list_artifact_plugins)
     _add_route(app, ENABLE_ALL_ARTIFACT_PLUGINS, enable_all_artifact_plugins)
     _add_route(app, GET_ARTIFACT_PLUGIN, get_artifact_plugin)
@@ -1784,9 +1797,41 @@ async def unload_artifact_plugin(
     return result
 
 
+def _require_plugin_manager(request: Request) -> PluginManager:
+    manager = request.app.state.plugin_manager
+    if manager is None:
+        raise _RuntimeNotReadyError
+    return manager
+
+
+async def list_plugins(http_request: Request) -> PluginPage:
+    return _require_plugin_manager(http_request).page()
+
+
+async def get_plugin(
+    name: Annotated[str, Path(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9-]*$")], http_request: Request
+) -> PluginState:
+    return _require_plugin_manager(http_request).get(name)
+
+
+async def generate_plugin_artifacts(
+    scope_id: _ScopePathId,
+    family: Annotated[str, Path(min_length=1, max_length=128, pattern=r"^[a-z][a-z0-9-]*$")],
+    request: GeneratePluginArtifactsRequest,
+    http_request: Request,
+) -> GeneratePluginArtifactsResponse:
+    sequence = await _require_plugin_manager(http_request).request(scope_id, family, request.params)
+    return GeneratePluginArtifactsResponse(status=PluginRequestStatus.ACCEPTED, request_sequence=sequence)
+
+
 async def get_capabilities(request: Request) -> Capabilities:
     capability_provider: CapabilityProvider | None = request.app.state.capability_provider
     value = capability_provider() if capability_provider is not None else request.app.state.capabilities
+    from powercontext.builtin.plugins.families import plugin_families
+
+    added = sorted(plugin_families() - set(value.artifact_families))
+    if added:
+        value = value.model_copy(update={"artifact_families": [*value.artifact_families, *added]})
     declaration_provider: Callable[[], Awaitable[list[dict[str, Any]]]] | None = (
         request.app.state.artifact_declaration_provider
     )

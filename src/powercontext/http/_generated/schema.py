@@ -2227,6 +2227,136 @@ OPENAPI_SCHEMA: dict[str, JsonValue] = {
                 "x-powercontext-scope-mode": "current",
             }
         },
+        "/v1/plugins": {
+            "get": {
+                "tags": ["plugins"],
+                "summary": "List loaded plugins",
+                "description": "Lists the plugins checked at Server startup, "
+                "whether each loaded or failed, and the calls "
+                "made since the process started. Plugins have no "
+                "persisted lifecycle state; change the plugin "
+                "directory and restart Server.",
+                "operationId": "list_plugins",
+                "responses": {
+                    "200": {
+                        "description": "Plugins found in the plugin directory at startup.",
+                        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PluginPage"}}},
+                    },
+                    "401": {"$ref": "#/components/responses/Unauthorized"},
+                    "403": {"$ref": "#/components/responses/Forbidden"},
+                    "503": {"$ref": "#/components/responses/Unavailable"},
+                },
+                "x-powercontext-access": {"action": "server.admin", "resource": {"type": "server"}},
+            }
+        },
+        "/v1/plugins/{name}": {
+            "get": {
+                "tags": ["plugins"],
+                "summary": "Get one loaded plugin",
+                "operationId": "get_plugin",
+                "x-powercontext-access": {"action": "server.admin", "resource": {"type": "server"}},
+                "parameters": [
+                    {
+                        "name": "name",
+                        "in": "path",
+                        "required": True,
+                        "schema": {"type": "string", "minLength": 1, "maxLength": 64, "pattern": "^[a-z][a-z0-9-]*$"},
+                    }
+                ],
+                "responses": {
+                    "200": {
+                        "description": "The plugin's startup check result, without configuration values.",
+                        "content": {"application/json": {"schema": {"$ref": "#/components/schemas/PluginState"}}},
+                    },
+                    "401": {"$ref": "#/components/responses/Unauthorized"},
+                    "403": {"$ref": "#/components/responses/Forbidden"},
+                    "404": {"$ref": "#/components/responses/NotFound"},
+                    "503": {"$ref": "#/components/responses/Unavailable"},
+                },
+            }
+        },
+        "/v1/scopes/{scope_id}/artifacts/{family}/generate": {
+            "post": {
+                "tags": ["plugins"],
+                "summary": "Request generation by an Artifact plugin",
+                "description": "Persists "
+                "the "
+                "request "
+                "and "
+                "returns "
+                "before "
+                "the "
+                "plugin "
+                "runs. "
+                "The "
+                "plugin "
+                "receives "
+                "every "
+                "request "
+                "accepted "
+                "since "
+                "its last "
+                "committed "
+                "invocation, "
+                "in "
+                "order, "
+                "together "
+                "with any "
+                "unconsumed "
+                "Sources. "
+                "Only "
+                "plugin "
+                "families "
+                "that "
+                "allow "
+                "manual "
+                "triggers "
+                "accept "
+                "requests.",
+                "operationId": "generate_plugin_artifacts",
+                "x-powercontext-access": {
+                    "action": "scope.contribute",
+                    "resource": {"type": "scope", "scope-id-from": "scope_id"},
+                },
+                "x-powercontext-scope-mode": "current",
+                "parameters": [
+                    {
+                        "name": "scope_id",
+                        "in": "path",
+                        "required": True,
+                        "schema": {"type": "string", "minLength": 1, "maxLength": 256, "pattern": ".*\\S.*"},
+                    },
+                    {
+                        "name": "family",
+                        "in": "path",
+                        "required": True,
+                        "schema": {"type": "string", "minLength": 1, "maxLength": 128, "pattern": "^[a-z][a-z0-9-]*$"},
+                    },
+                ],
+                "requestBody": {
+                    "required": True,
+                    "content": {
+                        "application/json": {"schema": {"$ref": "#/components/schemas/GeneratePluginArtifactsRequest"}}
+                    },
+                },
+                "responses": {
+                    "202": {
+                        "description": "The request is durable and an invocation is accepted.",
+                        "content": {
+                            "application/json": {
+                                "schema": {"$ref": "#/components/schemas/GeneratePluginArtifactsResponse"}
+                            }
+                        },
+                    },
+                    "401": {"$ref": "#/components/responses/Unauthorized"},
+                    "403": {"$ref": "#/components/responses/Forbidden"},
+                    "404": {"$ref": "#/components/responses/NotFound"},
+                    "409": {"$ref": "#/components/responses/Conflict"},
+                    "422": {"$ref": "#/components/responses/InvalidRequest"},
+                    "503": {"$ref": "#/components/responses/Unavailable"},
+                },
+            }
+        },
         "/v1/scopes/{scope_id}/artifacts/{family}/search": {
             "post": {
                 "tags": ["artifacts"],
@@ -7999,6 +8129,72 @@ OPENAPI_SCHEMA: dict[str, JsonValue] = {
                 "additionalProperties": False,
                 "type": "object",
                 "required": ["expected_generation"],
+            },
+            "PluginKind": {"type": "string", "enum": ["artifact"]},
+            "PluginLoadStatus": {"type": "string", "enum": ["loaded", "failed"]},
+            "PluginTrigger": {"type": "string", "enum": ["schedule", "sources", "manual"]},
+            "PluginCallOutcome": {"type": "string", "enum": ["succeeded", "failed"]},
+            "PluginRequestStatus": {"type": "string", "enum": ["accepted"]},
+            "PluginState": {
+                "properties": {
+                    "name": {"type": "string"},
+                    "kind": {"$ref": "#/components/schemas/PluginKind"},
+                    "status": {"$ref": "#/components/schemas/PluginLoadStatus"},
+                    "error": {
+                        "type": "string",
+                        "description": "Safe failure category from the startup check.",
+                        "nullable": True,
+                    },
+                    "family": {"type": "string", "nullable": True},
+                    "binding_name": {"type": "string", "nullable": True},
+                    "scopes": {"items": {"type": "string"}, "type": "array", "nullable": True},
+                    "triggers": {"items": {"$ref": "#/components/schemas/PluginTrigger"}, "type": "array"},
+                    "last_outcome": {
+                        "allOf": [{"$ref": "#/components/schemas/PluginCallOutcome"}],
+                        "description": "Latest call since process start.",
+                        "nullable": True,
+                    },
+                    "last_finished_at": {"type": "string", "format": "date-time", "nullable": True},
+                },
+                "additionalProperties": False,
+                "type": "object",
+                "required": [
+                    "name",
+                    "kind",
+                    "status",
+                    "error",
+                    "family",
+                    "binding_name",
+                    "scopes",
+                    "triggers",
+                    "last_outcome",
+                    "last_finished_at",
+                ],
+            },
+            "PluginPage": {
+                "properties": {"items": {"items": {"$ref": "#/components/schemas/PluginState"}, "type": "array"}},
+                "additionalProperties": False,
+                "type": "object",
+                "required": ["items"],
+            },
+            "GeneratePluginArtifactsRequest": {
+                "properties": {
+                    "params": {
+                        "description": "Plugin-defined request value delivered unchanged to the plugin.",
+                        "nullable": True,
+                    }
+                },
+                "additionalProperties": False,
+                "type": "object",
+            },
+            "GeneratePluginArtifactsResponse": {
+                "properties": {
+                    "status": {"$ref": "#/components/schemas/PluginRequestStatus"},
+                    "request_sequence": {"type": "integer", "minimum": 1.0},
+                },
+                "additionalProperties": False,
+                "type": "object",
+                "required": ["status", "request_sequence"],
             },
             "ArtifactPluginState": {
                 "properties": {

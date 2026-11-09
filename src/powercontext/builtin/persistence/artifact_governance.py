@@ -73,7 +73,10 @@ class ArtifactGovernanceRepository:
         self.prepared_indexes = prepared_indexes or {}
 
     async def _prepare_custom_transition(self, connection, scope_id, family, artifact_id, lifecycle_state):
-        if family in get_args(BaseArtifactFamily):
+        from powercontext.builtin.plugins.families import is_plugin_family
+
+        # Plugin families own their search projection through the plugin writer.
+        if family in get_args(BaseArtifactFamily) or is_plugin_family(family):
             return None
         from powercontext.builtin.persistence.artifact_indexes import ArtifactProjectionPublisher, lock_state
         from powercontext.builtin.persistence.custom_artifacts import custom_artifact_repository
