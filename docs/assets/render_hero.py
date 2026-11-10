@@ -75,7 +75,7 @@ def copy(lang, m):
             "line1": "同样解出题目，",
             "line2": f"Token 少用 {m['total_cut']:.2f}%",
             "sub": f"两组解出的是 {m['tasks']} 题中相同的 {m['solved_pc']} 题。PowerContext 一侧已计入记忆生成的开销。",
-            "off": "基线", "off_note": "网关关闭（Gateway OFF）",
+            "off": "基线", "off_note": "网关对照组（Gateway OFF）",
             "pc": "PowerContext", "pc_note": "代码检索 + 工作指导 + 项目记忆",
             "solving": f"解题 {millions(m['solving'])}", "memory": f"记忆生成 {millions(m['memory'])}",
             "saved": f"节省 {saved}",
@@ -147,8 +147,9 @@ body { font-family: Inter, "Noto Sans SC", sans-serif; color: var(--ink); font-v
 .value { position: absolute; right: 0; top: 6px; font-size: 28px; font-weight: 700; }
 .legend { position: absolute; left: 326px; top: 470px; display: flex; gap: 28px; font-size: 16px; color: var(--ink2); }
 .legend i { display: inline-block; width: 14px; height: 14px; border-radius: 3px; margin-right: 8px; vertical-align: -1px; }
-.stats { position: absolute; left: 64px; right: 64px; top: 530px; display: grid; grid-template-columns: repeat(3, 1fr);
+.stats { position: absolute; left: 64px; right: 64px; top: 530px; display: flex; justify-content: space-between;
          border-top: 1px solid var(--border); padding-top: 22px; }
+.stat + .stat { border-left: 1px solid var(--border); padding-left: 36px; }
 .stat { display: flex; align-items: baseline; gap: 12px; }
 .stat b { font-size: 30px; font-weight: 800; letter-spacing: -.02em; color: var(--accent); }
 .stat span { font-size: 16px; color: var(--ink2); }
@@ -227,6 +228,11 @@ def load(tab, html):
     # Labels must not collide with the bars or run off the card.
     assert tab.evaluate("""() => [...document.querySelectorAll('.label, .value, .stat, .sub, .head, .top')]
         .every(e => { const r = e.getBoundingClientRect(); return r.left >= 0 && r.right <= innerWidth - 40; })""")
+    # Bottom stats stay on one line with clear separation between them.
+    assert tab.evaluate("""() => { const s = [...document.querySelectorAll('.stat')];
+        const box = (e, q) => e.querySelector(q).getBoundingClientRect();
+        return s.every(e => box(e, 'span').height < 30)
+            && s.slice(1).every((e, i) => box(e, 'b').left - box(s[i], 'span').right >= 64); }""")
 
 
 def gif_palette(frame, theme):
