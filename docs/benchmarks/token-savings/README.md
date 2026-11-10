@@ -124,4 +124,4 @@ In the detailed results, **C = CodeGraph, S = Steering, M = Memory**. Combined l
 
 ## Why 40.30% and 32.57% differ
 
-40.30% covers only the solving model: 15,766,986 tokens. Adding 2,041,992 memory-generation tokens gives 17,808,978 tokens, or 32.57% below the same Gateway OFF baseline of 26,410,221. The README animation shows solving-only usage first, then usage including memory generation. Both use the same 24 tasks and aggregate reductions, not the arithmetic mean of per-task percentage reductions.
+40.30% covers only the solving model: 15,766,986 tokens. Adding 2,041,992 memory-generation tokens gives 17,808,978 tokens, or 32.57% below the same Gateway OFF baseline of 26,410,221. The README hero stacks both: the solving segment shows 40.30%, and the full bar, with memory generation, shows 32.57%. Both figures use the same 24 tasks and aggregate reductions, not the arithmetic mean of per-task percentage reductions.

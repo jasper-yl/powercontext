@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="docs/assets/readme-hero-en.gif" width="100%" alt="PowerContext: 24 SWE-bench Pro tasks. Solving only: 40.30% fewer tokens, 23.51% lower estimated model cost. Including memory generation: 32.57% and 15.42%. Best task: 63.49% and 51.98%." />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/readme-hero-en-dark.gif" />
+    <img src="docs/assets/readme-hero-en-light.gif" width="100%" alt="PowerContext on 24 shared SWE-bench Pro tasks: both arms solved the same 16 tasks. Tokens fell from 26.41M to 17.81M (32.57% fewer), counting 15.77M for solving and 2.04M for memory generation. Solving only: 40.30% fewer tokens. Estimated model cost: 15.42% lower with memory generation. Best task: 63.49% fewer tokens." />
+  </picture>
 </p>
 
 <p align="center">
@@ -33,9 +36,7 @@ Run it as a service through HTTP, MCP, Python, or Agent integrations, or embed C
 
 ## Proof it works
 
-**Spend fewer tokens. Lower model costs.** On the same 24 SWE-bench Pro tasks, PowerContext used **32.57% fewer tokens** and delivered **15.42% lower estimated model cost**, including memory generation. Both groups solved **16 tasks**.
-
-<img src="docs/assets/readme-results-en.png" width="100%" alt="24 tasks: 32.57% fewer tokens, 15.42% lower estimated cost. Best task: 63.49% fewer tokens, 51.98% lower estimated cost. Memory generation included." />
+**Spend fewer tokens. Lower model costs.** On the same 24 SWE-bench Pro tasks, PowerContext used **32.57% fewer tokens** and delivered **15.42% lower estimated model cost**, including memory generation. Both groups solved the **same 16 tasks**.
 
 **Solving alone uses 40.30% fewer tokens; including memory generation overhead, the reduction is 32.57%.** Saved memories can be reused in later sessions, extending the value of accumulated knowledge. This benchmark measures the current run; future reuse benefits have not been measured here.
 

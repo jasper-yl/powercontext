@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="docs/assets/readme-hero-zh.gif" width="100%" alt="PowerContext：SWE-bench Pro 同24题，仅解题 Token 减少40.30%、估算模型成本减少23.51%；含记忆生成后分别减少32.57%、15.42%；单题最高分别减少63.49%、51.98%。" />
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="docs/assets/readme-hero-zh-dark.gif" />
+    <img src="docs/assets/readme-hero-zh-light.gif" width="100%" alt="PowerContext 在 SWE-bench Pro 同 24 题上的对比：两组解出相同的 16 题。Token 从 2641 万降到 1781 万，减少 32.57%，其中解题 1577 万、记忆生成 204 万。仅解题 Token 减少 40.30%；计入记忆生成后估算模型成本降低 15.42%；单题最高 Token 降幅 63.49%。" />
+  </picture>
 </p>
 
 <p align="center">
@@ -33,9 +36,7 @@
 
 ## 效果证据
 
-**省下 Token，也省下模型成本。** 在 SWE-bench Pro 同 24 道题的对比中，计入记忆生成后，Token 总量减少 **32.57%**，估算模型成本减少 **15.42%**；两组均通过 **16 题**。
-
-<img src="docs/assets/readme-results-zh.png" width="100%" alt="同24题：Token减少32.57%，估算成本减少15.42%；单题最高分别减少63.49%和51.98%。已计入记忆生成。" />
+**省下 Token，也省下模型成本。** 在 SWE-bench Pro 同 24 道题的对比中，计入记忆生成后，Token 总量减少 **32.57%**，估算模型成本减少 **15.42%**；两组解出的是**相同的 16 题**。
 
 **只看解题，Token 减少 40.30%；计入记忆生成成本后，仍减少 32.57%。** 记忆还可以在后续会话中反复复用，让已积累的知识继续发挥价值。本次测试衡量当轮开销，后续复用的收益尚未计入。
 
