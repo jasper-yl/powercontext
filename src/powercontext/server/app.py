@@ -48,7 +48,7 @@ from starlette.types import Lifespan, Scope
 from typing_extensions import override
 
 from powercontext._logging import error_category, log_safely
-from powercontext.artifacts import ArtifactAddress, ArtifactRef, StableHandle
+from powercontext.artifacts import ArtifactAddress, ArtifactLineage, ArtifactRef, StableHandle
 from powercontext.artifacts.search import (
     ArtifactSearchExecutionContext,
     ArtifactSearchFamilyNotFound,
@@ -80,6 +80,14 @@ from powercontext.builtin.artifacts.memory.errors import (
     MemoryEntryInactiveError,
     MemoryEntryNotFoundError,
     MemoryWriteRejectedError,
+)
+from powercontext.builtin.artifacts.merge_models import (
+    ArtifactMergeConflictError,
+    ArtifactMergePreviewExpiredError,
+    ArtifactMergeRead,
+    ArtifactMergeRelationError,
+    InvalidArtifactMergePreviewError,
+    InvalidArtifactMergeStateError,
 )
 from powercontext.builtin.artifacts.prompt import GeneratePromptDemonstrations, PromptError
 from powercontext.builtin.artifacts.skill import (
@@ -362,9 +370,6 @@ from powercontext.builtin.tags import (
 from powercontext.builtin.tags import (
     TagFilter as RuntimeTagFilter,
 )
-from powercontext.builtin.tags import (
-    TaggableArtifactFamily as RuntimeTaggableArtifactFamily,
-)
 from powercontext.builtin.work import (
     AcknowledgeHandoff as RuntimeAcknowledgeHandoff,
 )
@@ -415,12 +420,16 @@ from powercontext.http import (
     ArtifactCollectionItem,
     ArtifactCreated,
     ArtifactFamilyAccessCapability,
+    ArtifactGovernanceRecord,
+    ArtifactGovernanceResponse,
     ArtifactHandleBinding,
     ArtifactPage,
     ArtifactPluginPage,
     ArtifactPluginState,
     ArtifactReadFamily,
     ArtifactReference,
+    ArtifactRestorationOperation,
+    ArtifactRestorationResult,
     ArtifactRevision,
     ArtifactRevisionPage,
     BaseArtifactFamily,
@@ -472,6 +481,7 @@ from powercontext.http import (
     FlushProfileResponse,
     FlushTopicMemoryRequest,
     FlushTopicMemoryResponse,
+    ForgetArtifactRequest,
     GeneratedCandidateResponse,
     GenerateExperienceRequest,
     GeneratePromptDemonstrationsRequest,
@@ -509,6 +519,7 @@ from powercontext.http import (
     ListMemoryChangesResponse,
     ListMemoryEntriesRequest,
     ListMemoryEntriesResponse,
+    ListPluginScopesRequest,
     ListRemoteSkillTargetsRequest,
     ListRemoteSkillTargetsResponse,
     ListScopesRequest,
@@ -516,6 +527,10 @@ from powercontext.http import (
     MemoryCapacity,
     MemoryEntryAccessSelector,
     MemoryMutationResponse,
+    MergeArtifactsRequest,
+    PluginPage,
+    PluginScopePage,
+    PluginState,
     PrepareContextRequest,
     PreparedContext,
     PreparedWorkHandoff,
@@ -553,9 +568,11 @@ from powercontext.http import (
     RenameRemoteSkillTargetRequest,
     ReplaceAccessBindingRequest,
     ReplaceArtifactRequest,
+    ReplacePluginArtifactRequest,
     ResolveExternalSkillRequest,
     ResolveScopeBindingRequest,
     ResolveScopeSelectionRequest,
+    RestoreArtifactRequest,
     RetireMemoryEntryRequest,
     ReviseCandidateRequest,
     ReviseMemoryEntryRequest,
@@ -633,6 +650,9 @@ from powercontext.http import (
     AccessSubject as TransportAccessSubject,
 )
 from powercontext.http import (
+    ArtifactLifecycleState as TransportArtifactLifecycleState,
+)
+from powercontext.http import (
     ArtifactPublication as TransportArtifactPublication,
 )
 from powercontext.http import (
@@ -668,7 +688,6 @@ from powercontext.http._generated.models import (
     ReplaceArtifactTagsRequest,
     RetryTopicMemoryProcessingRequest,
     RetryTopicMemoryProcessingResponse,
-    TaggableArtifactFamily,
     TagMatch,
     TagTargetType,
     TopicMemoryProcessingBlock,
@@ -712,11 +731,13 @@ from powercontext.http._generated.operations import (
     FLUSH_MEMORY,
     FLUSH_PROFILE,
     FLUSH_TOPIC_MEMORY,
+    FORGET_ARTIFACT,
     GENERATE_EXPERIENCE,
     GENERATE_PROMPT_DEMONSTRATIONS,
     GENERATE_SKILL,
     GET_ACCESS_PRINCIPAL,
     GET_ARTIFACT,
+    GET_ARTIFACT_GOVERNANCE,
     GET_ARTIFACT_PLUGIN,
     GET_ARTIFACT_REVISION,
     GET_ARTIFACT_TAGS,
@@ -732,6 +753,7 @@ from powercontext.http._generated.operations import (
     GET_MEMORY_CAPACITY,
     GET_MEMORY_ENTRY,
     GET_MEMORY_ENTRY_TAGS,
+    GET_PLUGIN,
     GET_PROFILE_POLICY,
     GET_PROMPT_CONFIGURATION,
     GET_READINESS,
@@ -759,9 +781,12 @@ from powercontext.http._generated.operations import (
     LIST_MANAGED_SKILLS,
     LIST_MEMORY_CHANGES,
     LIST_MEMORY_ENTRIES,
+    LIST_PLUGIN_SCOPES,
+    LIST_PLUGINS,
     LIST_REMOTE_SKILL_TARGETS,
     LIST_SCOPES,
     LIST_SOURCES,
+    MERGE_ARTIFACTS,
     OPENAPI_VERSION,
     PREPARE_BOOTSTRAP_CONTEXT,
     PREPARE_CONTEXT,
@@ -793,6 +818,7 @@ from powercontext.http._generated.operations import (
     RESOLVE_EXTERNAL_SKILL,
     RESOLVE_SCOPE_BINDING,
     RESOLVE_SCOPE_SELECTION,
+    RESTORE_ARTIFACT,
     RETIRE_MEMORY_ENTRY,
     RETRY_TOPIC_MEMORY_PROCESSING,
     REVISE_CANDIDATE,
@@ -881,10 +907,12 @@ from powercontext.server.dream_compatibility import (
     negotiate_dream_contract,
     require_extended_dream,
 )
+from powercontext.server.plugins import PluginManager
 from powercontext.server.request_id import REQUEST_ID_HEADER
 from powercontext.server.tracing import request_id_from_span
 from powercontext.sources import ConnectorBinding as RuntimeConnectorBinding
 from powercontext.sources import SourceDefinitionManifest as RuntimeSourceDefinitionManifest
+from powercontext.sources import SourceRef
 
 if TYPE_CHECKING:
     from powercontext.server.metrics import ServerMetrics
@@ -1384,6 +1412,7 @@ def create_app(
     )
     app.openapi_version = OPENAPI_VERSION
     app.state.artifact_plugin_manager = None
+    app.state.plugin_manager = None
     app.state.artifact_declaration_provider = None
     app.state.artifact_access_refresher = None
     app.state.application = application
@@ -1484,6 +1513,13 @@ def create_app(
     _add_route(app, GET_READINESS, get_readiness)
     _add_route(app, GET_SERVER_INFO, get_server_info)
     _add_route(app, GET_CAPABILITIES, get_capabilities)
+    _add_route(app, LIST_PLUGINS, list_plugins)
+    _add_route(app, GET_PLUGIN, get_plugin)
+    _add_route(app, LIST_PLUGIN_SCOPES, list_plugin_scopes)
+    _add_route(app, GET_ARTIFACT_GOVERNANCE, get_artifact_governance)
+    _add_route(app, MERGE_ARTIFACTS, merge_artifacts)
+    _add_route(app, FORGET_ARTIFACT, forget_artifact)
+    _add_route(app, RESTORE_ARTIFACT, restore_artifact)
     _add_route(app, LIST_ARTIFACT_PLUGINS, list_artifact_plugins)
     _add_route(app, ENABLE_ALL_ARTIFACT_PLUGINS, enable_all_artifact_plugins)
     _add_route(app, GET_ARTIFACT_PLUGIN, get_artifact_plugin)
@@ -1784,9 +1820,181 @@ async def unload_artifact_plugin(
     return result
 
 
+def _require_plugin_manager(request: Request) -> PluginManager:
+    manager = request.app.state.plugin_manager
+    if manager is None:
+        raise _RuntimeNotReadyError
+    return manager
+
+
+async def list_plugins(http_request: Request) -> PluginPage:
+    return _require_plugin_manager(http_request).page()
+
+
+async def get_plugin(
+    name: Annotated[str, Path(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9-]*$")], http_request: Request
+) -> PluginState:
+    return _require_plugin_manager(http_request).get(name)
+
+
+def _list_plugin_scopes_query(
+    http_request: Request,
+    limit: Annotated[int, Query(ge=1, le=200)] = 50,
+    cursor: Annotated[str | None, Query(min_length=1, max_length=256)] = None,
+) -> ListPluginScopesRequest:
+    _require_strict_query(http_request, {"limit", "cursor"})
+    return ListPluginScopesRequest(limit=limit, cursor=cursor)
+
+
+async def list_plugin_scopes(
+    name: Annotated[str, Path(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9-]*$")],
+    request: Annotated[ListPluginScopesRequest, Depends(_list_plugin_scopes_query)],
+    http_request: Request,
+) -> PluginScopePage:
+    return await _require_plugin_manager(http_request).scopes(name, cursor=request.cursor, limit=request.limit or 50)
+
+
+def _merge_registry(http_request: Request, family: str) -> Any:
+    merge = getattr(_require_application(http_request), "artifact_merge", None)
+    if merge is None:
+        raise BaseOperationNotSupportedError("artifact_family", family, "registered Artifact merge adapter")
+    return merge
+
+
+def _merge_scope(http_request: Request, scope_id: str, family: str) -> Any:
+    return _merge_registry(http_request, family).for_scope(scope_id, family)
+
+
+def _merge_execution_context(http_request: Request, operation: str) -> ArtifactSearchExecutionContext | None:
+    # The shared merge service authorizes every input and result itself.
+    access = access_control_for_mode(http_request.app.state.access_control, mode=http_request.app.state.access_mode)
+    if access is None:
+        return None
+    return ArtifactSearchExecutionContext(
+        principal=_require_principal(), access=access, audit=_access_audit_context(operation)
+    )
+
+
+def _merge_content(http_request: Request, family: str, content: dict[str, Any]) -> Any:
+    from powercontext.builtin.plugins.families import PluginArtifactContent, search_text
+
+    manager = http_request.app.state.plugin_manager
+    manifest = None if manager is None else manager.plugin_for_family(family)
+    if manifest is not None:
+        return PluginArtifactContent(content=content, search_text=search_text(content, manifest.spec.search_fields))
+    content_type = _merge_registry(http_request, family).content_type(family)
+    try:
+        return content_type.model_validate(content)
+    except PydanticValidationError as error:
+        raise InvalidBaseAccessRequestError("content", "does not match the Family's content shape") from error
+
+
+def _artifact_reference(ref: Any) -> ArtifactReference:
+    return ArtifactReference(family=ref.family, artifact_id=ref.artifact_id, revision=ref.revision)
+
+
+def _governance_record(record: Any) -> ArtifactGovernanceRecord:
+    return ArtifactGovernanceRecord(
+        artifact=_artifact_reference(record.ref),
+        lifecycle_state=TransportArtifactLifecycleState(record.state.lifecycle_state.value),
+        state_version=record.state.governance_generation,
+        merged_into_id=record.state.merged_into_id,
+    )
+
+
+def _governance_response(result: Any) -> ArtifactGovernanceResponse:
+    return ArtifactGovernanceResponse(
+        changed=result.changed, records=[_governance_record(record) for record in result.records]
+    )
+
+
+async def get_artifact_governance(
+    scope_id: _ScopePathId,
+    family: Annotated[str, Path(min_length=1, max_length=128, pattern=r"^[a-z][a-z0-9-]*$")],
+    artifact_id: Annotated[str, Path(min_length=1, max_length=128, pattern=r"^[\x21-\x7E]+$")],
+    http_request: Request,
+) -> ArtifactGovernanceRecord:
+    record = await _merge_scope(http_request, scope_id, family).get(
+        artifact_id, context=_merge_execution_context(http_request, "get_artifact_governance")
+    )
+    return _governance_record(record)
+
+
+async def merge_artifacts(
+    scope_id: _ScopePathId,
+    family: Annotated[str, Path(min_length=1, max_length=128, pattern=r"^[a-z][a-z0-9-]*$")],
+    request: MergeArtifactsRequest,
+    http_request: Request,
+) -> ArtifactGovernanceResponse:
+    scoped = _merge_scope(http_request, scope_id, family)
+    content = _merge_content(http_request, family, request.content)
+    inputs = tuple(
+        ArtifactMergeRead(
+            ref=ArtifactRef(family=family, artifact_id=item.artifact_id, revision=item.revision),
+            lifecycle_state=ArtifactLifecycleState.ACTIVE,
+            state_version=item.state_version,
+        )
+        for item in request.inputs
+    )
+    references = (
+        *(item.ref for item in inputs),
+        *(ArtifactRef.model_validate(item.model_dump(mode="json")) for item in request.artifact_refs or ()),
+    )
+    lineage = ArtifactLineage(
+        sources=tuple(SourceRef.model_validate(item.model_dump(mode="json")) for item in request.source_refs or ()),
+        artifacts=tuple({(ref.family, ref.artifact_id, ref.revision): ref for ref in references}.values()),
+    )
+    result = await scoped.merge(
+        inputs, content, lineage=lineage, context=_merge_execution_context(http_request, "merge_artifacts")
+    )
+    return _governance_response(result)
+
+
+async def forget_artifact(
+    scope_id: _ScopePathId,
+    family: Annotated[str, Path(min_length=1, max_length=128, pattern=r"^[a-z][a-z0-9-]*$")],
+    artifact_id: Annotated[str, Path(min_length=1, max_length=128, pattern=r"^[\x21-\x7E]+$")],
+    request: ForgetArtifactRequest,
+    http_request: Request,
+) -> ArtifactGovernanceResponse:
+    result = await _merge_scope(http_request, scope_id, family).forget(
+        artifact_id,
+        expected_revision=request.revision,
+        expected_state_version=request.state_version,
+        context=_merge_execution_context(http_request, "forget_artifact"),
+    )
+    return _governance_response(result)
+
+
+async def restore_artifact(
+    scope_id: _ScopePathId,
+    family: Annotated[str, Path(min_length=1, max_length=128, pattern=r"^[a-z][a-z0-9-]*$")],
+    artifact_id: Annotated[str, Path(min_length=1, max_length=128, pattern=r"^[\x21-\x7E]+$")],
+    request: RestoreArtifactRequest,
+    http_request: Request,
+) -> ArtifactRestorationResult:
+    result = await _merge_scope(http_request, scope_id, family).restore(
+        artifact_id,
+        operation=(request.operation or ArtifactRestorationOperation.RESTORE).value,
+        revision=request.revision,
+        context=_merge_execution_context(http_request, "restore_artifact"),
+    )
+    return ArtifactRestorationResult(
+        changed=result.changed,
+        restored=[_artifact_reference(ref) for ref in result.restored],
+        retired=[_artifact_reference(ref) for ref in result.retired],
+        undo_merge_results=list(result.undo_merge_results),
+    )
+
+
 async def get_capabilities(request: Request) -> Capabilities:
     capability_provider: CapabilityProvider | None = request.app.state.capability_provider
     value = capability_provider() if capability_provider is not None else request.app.state.capabilities
+    from powercontext.builtin.plugins.families import plugin_families
+
+    added = sorted(plugin_families() - set(value.artifact_families))
+    if added:
+        value = value.model_copy(update={"artifact_families": [*value.artifact_families, *added]})
     declaration_provider: Callable[[], Awaitable[list[dict[str, Any]]]] | None = (
         request.app.state.artifact_declaration_provider
     )
@@ -2935,7 +3143,7 @@ async def generate_prompt_demonstrations(
 
 async def get_artifact_tags(
     scope_id: Annotated[str, Path(min_length=1, max_length=256)],
-    family: Annotated[TaggableArtifactFamily, Path()],
+    family: Annotated[str, Path(min_length=1, max_length=128, pattern=r"^[a-z][a-z0-9-]*$")],
     artifact_id: Annotated[str, Path(min_length=1, max_length=128)],
     response: Response,
     application: Annotated[ServerApplication, Depends(_require_application)],
@@ -2948,7 +3156,7 @@ async def get_artifact_tags(
 
 async def replace_artifact_tags(
     scope_id: Annotated[str, Path(min_length=1, max_length=256)],
-    family: Annotated[TaggableArtifactFamily, Path()],
+    family: Annotated[str, Path(min_length=1, max_length=128, pattern=r"^[a-z][a-z0-9-]*$")],
     artifact_id: Annotated[str, Path(min_length=1, max_length=128)],
     request: ReplaceArtifactTagsRequest,
     response: Response,
@@ -2957,7 +3165,7 @@ async def replace_artifact_tags(
     if_match: Annotated[str | None, Header(alias="If-Match")] = None,
 ) -> ArtifactTagSet:
     target = ArtifactTagTarget(family=_tag_family(family), artifact_id=artifact_id)
-    if family.value == "atomic-memory":
+    if target.family == "atomic-memory":
         await _authorize_atomic_tag_write(http_request, scope_id, artifact_id, "replace_artifact_tags")
     result = await application.records.for_scope(scope_id).replace_tags(
         target,
@@ -2971,10 +3179,10 @@ async def replace_artifact_tags(
     return ArtifactTagSet.model_validate(result.model_dump(mode="json"))
 
 
-def _tag_family(family: TaggableArtifactFamily) -> RuntimeTaggableArtifactFamily:
-    if family is TaggableArtifactFamily.MEMORY:
+def _tag_family(family: str) -> str:
+    if family == BaseArtifactFamily.MEMORY.value:
         raise BaseOperationNotSupportedError("artifact_family", "memory", "collection tags")
-    return family.value
+    return family
 
 
 async def get_memory_entry_tags(
@@ -3033,9 +3241,9 @@ async def query_artifact_tags(
         if principal is not None
         else sha256(http_request.headers.get("authorization", "anonymous").encode()).hexdigest()
     )
-    if TaggableArtifactFamily.MEMORY in (request.families or ()) or TagTargetType.MEMORY_ENTRY in (
-        request.target_types or ()
-    ):
+    if any(
+        family.root == BaseArtifactFamily.MEMORY.value for family in request.families or ()
+    ) or TagTargetType.MEMORY_ENTRY in (request.target_types or ()):
         raise BaseOperationNotSupportedError("artifact_family", "memory", "tag query")
     query = TagQuery.model_validate_json(request.model_dump_json(exclude_none=True))
     result = await application.records.for_scope(scope_id).query_tags(query, caller=caller)
@@ -3072,7 +3280,7 @@ async def get_artifact(
 
 async def replace_artifact(
     scope_id: Annotated[str, Path(min_length=1, max_length=256, pattern=r".*\S.*")],
-    family: Annotated[BaseArtifactFamily, Path()],
+    family_name: Annotated[str, Path(alias="family", min_length=1, max_length=128, pattern=r"^[a-z][a-z0-9-]*$")],
     artifact_id: Annotated[str, Path(min_length=1, max_length=128, pattern=r"^[\x21-\x7E]+$")],
     request: ReplaceArtifactRequest,
     response: Response,
@@ -3080,6 +3288,16 @@ async def replace_artifact(
     application: Annotated[ServerApplication, Depends(_require_application)],
     if_match: Annotated[str | None, Header(alias="If-Match")] = None,
 ) -> ArtifactRevision:
+    from powercontext.builtin.plugins.families import is_plugin_family
+
+    if is_plugin_family(family_name):
+        return await _replace_plugin_artifact(
+            scope_id, family_name, artifact_id, response, http_request, application, if_match
+        )
+    try:
+        family = BaseArtifactFamily(family_name)
+    except ValueError:
+        raise BaseValueNotFoundError("artifact_family", family_name) from None
     if family.value == "memory":
         raise BaseOperationNotSupportedError("artifact_family", "memory", "collection writes")
     expected_etag = _require_artifact_etag(if_match)
@@ -3103,6 +3321,33 @@ async def replace_artifact(
         previous_entry_ids=frozenset(),
         operation=REPLACE_ARTIFACT.operation_id,
     )
+    response.headers["ETag"] = _artifact_etag(result.revision)
+    return _artifact_revision_response(result)
+
+
+async def _replace_plugin_artifact(
+    scope_id: str,
+    family: str,
+    artifact_id: str,
+    response: Response,
+    http_request: Request,
+    application: ServerApplication,
+    if_match: str | None,
+) -> ArtifactRevision:
+    expected_etag = _require_artifact_etag(if_match)
+    # Plugin content is opaque: store the submitted JSON, not a built-in model's re-serialization.
+    body = await http_request.json()
+    content = body.get("content") if isinstance(body, dict) else None
+    if not isinstance(content, dict) or set(body) != {"content"}:
+        raise InvalidBaseAccessRequestError("content", "must be the complete plugin content object")
+    scoped = application.records.for_scope(scope_id)
+    current = await scoped.get_artifact(family, artifact_id)
+    if expected_etag != _artifact_etag(current.revision):
+        raise ArtifactRevisionPreconditionError(expected_etag, _artifact_etag(current.revision))
+    await _require_plugin_manager(http_request).replace(
+        scope_id, family, artifact_id, content, expected_revision=current.revision
+    )
+    result = await scoped.get_artifact(family, artifact_id)
     response.headers["ETag"] = _artifact_etag(result.revision)
     return _artifact_revision_response(result)
 
@@ -3196,7 +3441,10 @@ def _artifact_collection_item_response(value: RuntimeArtifactCollectionItem) -> 
 
 
 def _artifact_write(value: CreateArtifactRequest | ReplaceArtifactRequest) -> RuntimeArtifactWrite:
-    content = value.root.content
+    root = value.root
+    if isinstance(root, ReplacePluginArtifactRequest):
+        raise InvalidBaseAccessRequestError("content", "does not match a built-in Artifact contract")
+    content = root.content
     if isinstance(content, TransportHandoffContent):
         content = mapping.runtime_handoff_content(content)
     return RuntimeArtifactWrite(
@@ -3701,6 +3949,11 @@ def _atomic_execution_context(request: Request, operation: str) -> ArtifactSearc
 
 def _atomic_memory_domain_access(payload: Mapping[str, Any], _deployment_id: str):
     # Dynamic impact and read filtering are authorized by the domain service.
+    return ()
+
+
+def _artifact_merge_domain_access(payload: Mapping[str, Any], _deployment_id: str):
+    # Every input, result and restored group is authorized by the shared merge service.
     return ()
 
 
@@ -5380,6 +5633,19 @@ def _path_artifact_write_access(
     payload: Mapping[str, Any],
     _deployment_id: str,
 ) -> tuple[tuple[AccessAction, ResourceRef], ...]:
+    from powercontext.builtin.plugins.families import is_plugin_family
+
+    if is_plugin_family(family := _path_artifact_read_family(payload)):
+        return (
+            (
+                AccessAction.ARTIFACT_WRITE,
+                ResourceRef.artifact(
+                    _nested_request_value(payload, "scope_id"),
+                    family=family,
+                    artifact_id=_nested_request_value(payload, "artifact_id"),
+                ),
+            ),
+        )
     family = _path_artifact_family(payload)
     if family in {BaseArtifactFamily.PROMPT.value, "topic-memory"}:
         # Scope-owned configuration and knowledge cannot use retained Artifact ownership.
@@ -5393,7 +5659,8 @@ def _path_artifact_tags_write_access(
     payload: Mapping[str, Any],
     _deployment_id: str,
 ) -> tuple[tuple[AccessAction, ResourceRef], ...]:
-    if _path_artifact_family(payload) in {
+    family = _path_artifact_read_family(payload)
+    if family in {
         BaseArtifactFamily.MEMORY.value,
         BaseArtifactFamily.PROMPT.value,
         "topic-memory",
@@ -5401,7 +5668,16 @@ def _path_artifact_tags_write_access(
         # Scope-owned knowledge and configuration metadata require current
         # Scope administration, even if an Artifact owner binding remains.
         return _path_scope_access(payload, action=AccessAction.SCOPE_ADMIN)
-    return _path_artifact_access(payload, action=AccessAction.ARTIFACT_WRITE)
+    return (
+        (
+            AccessAction.ARTIFACT_WRITE,
+            ResourceRef.artifact(
+                _nested_request_value(payload, "scope_id"),
+                family=family,
+                artifact_id=_nested_request_value(payload, "artifact_id"),
+            ),
+        ),
+    )
 
 
 def _path_memory_entry_access(
@@ -5532,6 +5808,7 @@ _NAMED_ACCESS_RESOLVERS: dict[
     Callable[[Mapping[str, Any], str], tuple[tuple[AccessAction, ResourceRef], ...]],
 ] = {
     "atomic_memory_domain_access": _atomic_memory_domain_access,
+    "artifact_merge_domain_access": _artifact_merge_domain_access,
     "atomic_memory_state_access": _atomic_memory_state_access,
     "acknowledge_handoff_access": _acknowledge_handoff_resolver,
     "continue_handoff_access": _continue_handoff_resolver,
@@ -6254,11 +6531,9 @@ def _map_domain_error(error: Exception) -> tuple[int, str, str, dict[str, Any] |
             "The Topic Memory block no longer owns this frontier.",
             None,
         )
-    if isinstance(error, AtomicMemoryIndexError):
-        return 503, error.code, str(error), None
-    if isinstance(error, AtomicMemoryError):
-        code = 422 if isinstance(error, InvalidAtomicMemoryPreviewError) else 409
-        return code, error.code, str(error), None
+    artifact_merge = _map_artifact_merge_error(error)
+    if artifact_merge is not None:
+        return artifact_merge
     source_ingestion = _map_source_ingestion_error(error)
     if source_ingestion is not None:
         return source_ingestion
@@ -6284,6 +6559,27 @@ def _map_domain_error(error: Exception) -> tuple[int, str, str, dict[str, Any] |
     if isinstance(error, InferenceUnavailableError):
         return status.HTTP_503_SERVICE_UNAVAILABLE, "inference_unavailable", "Model inference is unavailable.", None
     return status.HTTP_500_INTERNAL_SERVER_ERROR, "internal_error", "The Server failed.", None
+
+
+def _map_artifact_merge_error(error: Exception) -> tuple[int, str, str, dict[str, Any] | None] | None:
+    if isinstance(error, AtomicMemoryIndexError):
+        return 503, error.code, str(error), None
+    if isinstance(error, AtomicMemoryError):
+        code = 422 if isinstance(error, InvalidAtomicMemoryPreviewError) else 409
+        return code, error.code, str(error), None
+    if isinstance(
+        error,
+        (
+            ArtifactMergeConflictError,
+            ArtifactMergeRelationError,
+            InvalidArtifactMergeStateError,
+            ArtifactMergePreviewExpiredError,
+        ),
+    ):
+        return status.HTTP_409_CONFLICT, error.code, str(error), None
+    if isinstance(error, InvalidArtifactMergePreviewError):
+        return status.HTTP_422_UNPROCESSABLE_CONTENT, error.code, str(error), None
+    return None
 
 
 def _map_memory_error(error: Exception) -> tuple[int, str, str, dict[str, Any] | None] | None:

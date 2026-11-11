@@ -597,4 +597,7 @@ async def _mark_custom_bindings_dirty(
     bindings = tuple(
         plugin.binding_name for plugin in plugins if plugin.scope_ids is None or scope_id in plugin.scope_ids
     )
+    from powercontext.builtin.plugins.families import source_bindings
+
+    bindings += source_bindings(scope_id)
     await intents.mark_dirty_many(connection, scope_id, bindings, increment=increment)

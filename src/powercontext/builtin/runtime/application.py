@@ -3741,6 +3741,17 @@ class ScopedArtifactMergeApplication:
                 inputs, content, artifact_id=artifact_id, lineage=lineage, context=self._context(context)
             )
 
+    async def forget(
+        self, artifact_id: str, *, expected_revision: int, expected_state_version: int, context: Any = None
+    ) -> ArtifactMergeMutationResult:
+        async with self._runtime._scoped_operation(self.scope_id, embedding_purpose=ModelUsagePurpose.MEMORY_INDEXING):
+            return await self._scoped.forget(
+                artifact_id,
+                expected_revision=expected_revision,
+                expected_state_version=expected_state_version,
+                context=self._context(context),
+            )
+
     async def preview_restoration(
         self,
         artifact_id: str,
@@ -3782,6 +3793,16 @@ class ArtifactMergeRuntimeApplication:
 
     def for_scope(self, scope_id: str, family: str, /) -> ScopedArtifactMergeApplication:
         return ScopedArtifactMergeApplication(self._runtime, self._application, scope_id, family)
+
+    def register(self, service: Any) -> None:
+        """Add a Family discovered after composition, such as a plugin family loaded at startup."""
+
+        self._application.register(service)
+
+    def content_type(self, family: str) -> type[BaseModel]:
+        """The content model a registered Family's merge results validate against."""
+
+        return self._application.content_type(family)
 
 
 class ScopedTopicMemoryApplication:

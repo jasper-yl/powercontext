@@ -791,7 +791,8 @@ class PowerContextClient:
 
     async def query_artifact_tags(self, scope_id: str, request: QueryArtifactTagsRequest) -> ArtifactTagPage:
         """Find visible targets by exact tags within a Scope."""
-        if "memory" in (request.families or ()) or "memory_entry" in (request.target_types or ()):
+        families = {family.root for family in request.families or ()}
+        if "memory" in families or "memory_entry" in (request.target_types or ()):
             raise ValueError("legacy Memory tag queries are unsupported; use atomic-memory Artifact tags")  # noqa: TRY003
         return await self._request(QUERY_ARTIFACT_TAGS, request, path_parameters={"scope_id": scope_id})
 

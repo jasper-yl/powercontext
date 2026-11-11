@@ -715,6 +715,158 @@ class ChangeArtifactPluginStateRequest(BaseModel):
     expected_generation: Annotated[StrictInt, Field(ge=1)]
 
 
+class PluginKind(StrEnum):
+    ARTIFACT = "artifact"
+
+
+class PluginLoadStatus(StrEnum):
+    LOADED = "loaded"
+    FAILED = "failed"
+
+
+class PluginTrigger(StrEnum):
+    SCHEDULE = "schedule"
+    SOURCES = "sources"
+
+
+class PluginState(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+    )
+    name: StrictStr
+    kind: PluginKind
+    status: PluginLoadStatus
+    error: Annotated[StrictStr | None, Field(description="Safe failure category from the startup check.")]
+    family: Annotated[StrictStr | None, Field(...)]
+    binding_name: Annotated[StrictStr | None, Field(...)]
+    scopes: Annotated[list[StrictStr] | None, Field(...)]
+    source_types: Annotated[
+        list[StrictStr] | None,
+        Field(description="Source types delivered to the plugin; null when it consumes no Sources."),
+    ]
+    triggers: list[PluginTrigger]
+
+
+class PluginPage(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+    )
+    items: list[PluginState]
+
+
+class PluginScopeState(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+    )
+    scope_id: StrictStr
+    pending: Annotated[
+        StrictBool, Field(description="New Sources or a schedule request are waiting for an invocation.")
+    ]
+    consumed_position: Annotated[
+        StrictInt | None,
+        Field(
+            description="Source journal position the plugin has consumed through; null when it consumes no Sources.",
+            ge=0,
+        ),
+    ]
+    source_position: Annotated[
+        StrictInt | None, Field(description="Latest Source journal position in the Scope, of any Source type.", ge=0)
+    ]
+
+
+class ListPluginScopesRequest(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+    )
+    cursor: Annotated[StrictStr | None, Field(max_length=256, min_length=1)] = None
+    limit: Annotated[StrictInt, Field(ge=1, le=200)] = 50
+
+
+class PluginScopePage(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+    )
+    items: list[PluginScopeState]
+    next_cursor: Annotated[StrictStr | None, Field(...)]
+
+
+class ArtifactLifecycleState(StrEnum):
+    ACTIVE = "active"
+    DEPRECATED = "deprecated"
+    RETIRED = "retired"
+
+
+class ArtifactGovernanceInput(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+    )
+    artifact_id: Annotated[StrictStr, Field(max_length=128, min_length=1)]
+    revision: Annotated[StrictInt, Field(ge=1)]
+    state_version: Annotated[StrictInt, Field(ge=0)]
+
+
+class ForgetArtifactRequest(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+    )
+    revision: Annotated[StrictInt, Field(ge=1)]
+    state_version: Annotated[StrictInt, Field(ge=0)]
+
+
+class ArtifactRestorationOperation(StrEnum):
+    RESTORE = "restore"
+    UNDO_MERGE = "undo_merge"
+
+
+class RestoreArtifactRequest(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+    )
+    operation: ArtifactRestorationOperation = ArtifactRestorationOperation.RESTORE
+    revision: Annotated[
+        StrictInt | None,
+        Field(
+            description="Content revision to restore; omitted restores the current one. Not accepted with undo_merge.",
+            ge=1,
+        ),
+    ] = None
+
+
+class ArtifactGovernanceRecord(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+    )
+    artifact: ArtifactReference
+    lifecycle_state: ArtifactLifecycleState
+    state_version: Annotated[StrictInt, Field(ge=0)]
+    merged_into_id: Annotated[StrictStr | None, Field(...)]
+
+
+class ArtifactGovernanceResponse(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+    )
+    changed: StrictBool
+    records: list[ArtifactGovernanceRecord]
+
+
+class ArtifactRestorationResult(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+    )
+    changed: StrictBool
+    restored: list[ArtifactReference]
+    retired: list[ArtifactReference]
+    undo_merge_results: list[StrictStr]
+
+
+class ReplacePluginArtifactRequest(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+    )
+    content: dict[str, Any]
+
+
 class DesiredState(StrEnum):
     ENABLED = "enabled"
     DISABLED = "disabled"
@@ -2813,15 +2965,16 @@ class CreateSourceRequest(BaseModel):
     ]
 
 
-class TaggableArtifactFamily(StrEnum):
-    MEMORY = "memory"
-    ATOMIC_MEMORY = "atomic-memory"
-    EXPERIENCE = "experience"
-    SKILL = "skill"
-    HANDOFF = "handoff"
-    PROFILE = "profile"
-    PROMPT = "prompt"
-    TOPIC_MEMORY = "topic-memory"
+class TaggableArtifactFamily(RootModel[StrictStr]):
+    root: Annotated[
+        StrictStr,
+        Field(
+            description="A built-in Family or a loaded plugin family; every readable Family supports logical tags on persisted Artifacts. The collection-level memory Family tags entries instead.",
+            max_length=128,
+            min_length=1,
+            pattern="^[a-z][a-z0-9-]*$",
+        ),
+    ]
 
 
 class TagMatch(StrEnum):
@@ -4524,6 +4677,18 @@ class DreamRunPage(BaseModel):
     next_cursor: StrictStr | None = None
 
 
+class MergeArtifactsRequest(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+    )
+    inputs: Annotated[list[ArtifactGovernanceInput], Field(min_length=2)]
+    content: Annotated[
+        dict[str, Any], Field(description="Complete content of the result in the Family's content shape.")
+    ]
+    source_refs: list[SourceReference] | None = None
+    artifact_refs: list[ArtifactReference] | None = None
+
+
 class ExtractionObservation(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
@@ -6060,6 +6225,7 @@ class ReplaceArtifactRequest(
         | ReplaceHandoffArtifactRequest
         | ReplacePromptArtifactRequest
         | ReplaceProfileArtifactRequest
+        | ReplacePluginArtifactRequest
     ]
 ):
     root: (
@@ -6071,6 +6237,7 @@ class ReplaceArtifactRequest(
         | ReplaceHandoffArtifactRequest
         | ReplacePromptArtifactRequest
         | ReplaceProfileArtifactRequest
+        | ReplacePluginArtifactRequest
     )
 
 
