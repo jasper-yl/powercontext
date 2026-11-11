@@ -62,7 +62,7 @@ from powercontext.http import (
     ReadinessResponse,
     ReadinessStatus,
 )
-from powercontext.paths import default_scheduler_path
+from powercontext.paths import default_scheduler_path, powercontext_data_dir
 from powercontext.server.access import HttpAccessLogMiddleware
 from powercontext.server.app import _bind_evidence_access, access_readiness_checks, create_app
 from powercontext.server.artifact_plugins import (
@@ -369,6 +369,16 @@ def create_server_app(  # noqa: C901
                     plugins_dir=resolved.plugins_dir,
                     register_merge=None if runtime.artifact_merge is None else runtime.artifact_merge.register,
                     dispatch=dispatch_plugins,
+                    inference_config=config.inference,
+                    storage_root=powercontext_data_dir() / "plugins",
+                    # Host processes authorize callers in every role that serves requests.
+                    host_security_builder=lambda: build_worker_security(
+                        resolved,
+                        active_access_control,
+                        legacy_static_principal=static_principal if legacy_static_admin else None,
+                        enabled=True,
+                        injected=configured_access_control is not None,
+                    ),
                 )
             )
             if active_access_control is not None:

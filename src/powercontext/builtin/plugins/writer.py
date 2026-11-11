@@ -12,11 +12,12 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""The constrained Artifact writer handed to ``generate``.
+"""The constrained Artifact writer handed to ``generate``, user changes, and plugin routes.
 
 Writes reuse the shared merge service so plugin families follow the same revision,
-merge, restoration and governance rules as built-in families. The single write
-transaction commits together with the consumption cursor and acknowledgment.
+merge, restoration and governance rules as built-in families. In a Worker the single
+write transaction commits together with the consumption cursor and acknowledgment; in
+the host process it commits one request's writes as the caller.
 """
 
 from __future__ import annotations
@@ -25,14 +26,16 @@ import asyncio
 import hashlib
 from collections.abc import Awaitable, Callable, Collection, Sequence
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import partial
-from typing import Any, cast
+from typing import Any, Literal, cast
 from uuid import uuid4
 
 from pydantic import JsonValue
 from sqlalchemy import delete, func, insert, select
 from sqlalchemy.ext.asyncio import AsyncConnection
+from typing_extensions import override
 
 from powercontext.artifacts import ArtifactLineage, ArtifactRef
 from powercontext.builtin.artifacts.merge import ArtifactMergeService
@@ -58,11 +61,10 @@ from powercontext.builtin.plugins.families import (
     publish_search_text,
     search_text,
 )
-from powercontext.builtin.runtime.artifact_merge import merge_artifact_tags
-from powercontext.builtin.sources import BUILTIN_SOURCE_REGISTRY
+from powercontext.builtin.runtime.artifact_merge import ArtifactMergeAccess, merge_artifact_tags
 from powercontext.builtin.sources.content import ContentSource, ContentSourceInternal, ContentSourceTarget
 from powercontext.builtin.tags import normalize_tags
-from powercontext.plugins import ArtifactPage, ArtifactPluginSpec, ArtifactSnapshot, LifecycleState, UndoMergePreview
+from powercontext.plugins import ArtifactChange, ArtifactPage, ArtifactSnapshot, LifecycleState, UndoMergePreview
 from powercontext.sources import SourceMaterialization, SourceRef
 
 MAX_WRITES_PER_TRANSACTION = 1000
@@ -72,6 +74,29 @@ MAX_TRANSACTION_BYTES = 8 * 1024 * 1024
 
 class PluginWriteError(ValueError):
     """A plugin write violated the writer's scope, evidence, or size constraints."""
+
+
+class PluginContractError(PluginWriteError):
+    """A user-change method returned without completing exactly its agreed write."""
+
+
+@dataclass(frozen=True)
+class UserChange:
+    """The one write a user-change method must complete, on ``artifact_id`` (or ``into`` for merges)."""
+
+    operation: Literal["create", "update", "merge", "forget", "restore", "undo_merge"]
+    artifact_id: str
+    inputs: tuple[str, ...] = ()
+
+
+_AGREED = {
+    "create": {"put"},
+    "update": {"put"},
+    "merge": {"merge"},
+    "forget": {"deprecate"},
+    "restore": {"revert", "activate"},
+    "undo_merge": {"undo_merge"},
+}
 
 
 class _Adapter:
@@ -149,6 +174,9 @@ class _Reads:
         self._owner = owner
         self._connect = connect
 
+    def _seen(self, snapshots: Sequence[ArtifactSnapshot]) -> None:
+        """Committed reads remember the revision each later write is decided against."""
+
     async def _record(self, connection, artifact_id: str, revision: int | None = None) -> ArtifactMergeRecord | None:
         owner = self._owner
         try:
@@ -159,7 +187,10 @@ class _Reads:
     async def get(self, artifact_id: str, /, *, revision: int | None = None) -> ArtifactSnapshot | None:
         async with self._connect() as connection:
             record = await self._record(connection, artifact_id, revision)
-        return None if record is None else _snapshot(record)
+        snapshot = None if record is None else _snapshot(record)
+        if snapshot is not None and revision is None:
+            self._seen((snapshot,))
+        return snapshot
 
     async def revisions(self, artifact_id: str, /, *, cursor: str | None = None, limit: int = 50) -> ArtifactPage:
         owner = self._owner
@@ -213,6 +244,7 @@ class _Reads:
             identities = (await connection.execute(statement)).scalars().all()
             records = [await self._record(connection, identity) for identity in identities[:limit]]
         items = tuple(_snapshot(record) for record in records if record is not None)
+        self._seen(items)
         return ArtifactPage(items=items, next_cursor=identities[limit - 1] if len(identities) > limit else None)
 
     async def search(self, query: str, /, *, limit: int = 10) -> tuple[ArtifactSnapshot, ...]:
@@ -226,7 +258,9 @@ class _Reads:
                 for row in rows
                 if not row.get("is_rejected") and row["artifact_id"] is not None
             ]
-        return tuple(_snapshot(record) for record in records if record is not None)
+        found = tuple(_snapshot(record) for record in records if record is not None)
+        self._seen(found)
+        return found
 
     async def by_source(self, ref: SourceRef, /) -> tuple[ArtifactSnapshot, ...]:
         owner = self._owner
@@ -245,7 +279,9 @@ class _Reads:
         async with self._connect() as connection:
             identities = (await connection.execute(statement)).scalars().all()
             records = [await self._record(connection, identity) for identity in identities]
-        return tuple(_snapshot(record) for record in records if record is not None)
+        found = tuple(_snapshot(record) for record in records if record is not None)
+        self._seen(found)
+        return found
 
     async def merge_inputs(self, artifact_id: str, /) -> tuple[ArtifactRef, ...]:
         owner = self._owner
@@ -295,6 +331,19 @@ class PluginArtifactTransaction(_Reads):
         self._writes = 0
         self._bytes = 0
         self.closed = False
+        self.agreed = 0
+
+    def _agree(self, kind: str, artifact_id: str) -> None:
+        """In a user change, only the agreed write on its target (and its tags) may run."""
+
+        change = self._owner.change
+        if change is None:
+            return
+        if kind == "tags" and artifact_id == change.artifact_id:
+            return
+        if kind not in _AGREED[change.operation] or artifact_id != change.artifact_id or self.agreed:
+            raise PluginContractError(f"{change.operation} allows exactly one agreed write on its target")  # noqa: TRY003
+        self.agreed += 1
 
     def _admit(self, content: dict[str, JsonValue] | None = None, sources: Sequence[SourceRef] = ()) -> None:
         if self.closed:
@@ -307,15 +356,28 @@ class PluginArtifactTransaction(_Reads):
             self._bytes += size
             if size > MAX_CONTENT_BYTES or self._bytes > MAX_TRANSACTION_BYTES:
                 raise PluginWriteError("the write transaction exceeds its size limit")  # noqa: TRY003
-        outside = {(ref.source_type, ref.source_id) for ref in sources} - self._owner.window_sources
-        if outside:
-            raise PluginWriteError("source_refs must reference Sources of this invocation window")  # noqa: TRY003
+        if self._owner.change is None:
+            outside = {(ref.source_type, ref.source_id) for ref in sources} - self._owner.window_sources
+            if outside:
+                raise PluginWriteError("source_refs must reference Sources of this invocation window")  # noqa: TRY003
 
-    async def _commit(self, plan) -> ArtifactSnapshot:
+    async def _committed(self, plan, direct_source: SourceRef | None = None):
         owner = self._owner
         prepared = await owner.service.prepare_change(plan)
-        result = await owner.service.commit(self._connection, prepared, None)
-        return _snapshot(result.primary)
+        return await owner.service.commit(self._connection, prepared, owner.context, direct_source=direct_source)
+
+    async def _commit(self, plan) -> ArtifactSnapshot:
+        return _snapshot((await self._committed(plan)).primary)
+
+    async def _commit_change(self, plan, artifact_id: str) -> ArtifactChange:
+        result = await self._committed(plan)
+        change = ArtifactChange(
+            artifact=_snapshot(result.primary),
+            restored=tuple(ref for ref in result.restored if ref.artifact_id != artifact_id),
+            retired=tuple(ref for ref in result.retired if ref.artifact_id != artifact_id),
+        )
+        self._owner.outcome = (result.restored, result.retired, result.undo_merge_results)
+        return change
 
     async def _require(self, artifact_id: str) -> ArtifactMergeRecord:
         record = await self._record(self._connection, artifact_id)
@@ -335,9 +397,26 @@ class PluginArtifactTransaction(_Reads):
     ) -> ArtifactSnapshot:
         self._admit(content, source_refs)
         owner = self._owner
+        change = owner.change
+        self._agree("put", artifact_id)
         body = owner.body(content)
         current = await self._record(self._connection, artifact_id)
-        if current is not None and current.artifact.content == body:
+        if expected_revision is None:
+            expected_revision = owner.observed.get(artifact_id)
+        if change is not None:
+            if (change.operation == "create") != (current is None):
+                raise owner.service.errors.conflict(
+                    "create needs a new Artifact" if current is not None else "the Artifact no longer exists"
+                )
+            allowed = (
+                set()
+                if current is None
+                else {(ref.source_type, ref.source_id) for ref in current.artifact.lineage.sources}
+            )
+            if {(ref.source_type, ref.source_id) for ref in source_refs} - allowed:
+                raise PluginWriteError("user changes may only keep Sources already in the Artifact lineage")  # noqa: TRY003
+        elif current is not None and current.artifact.content == body:
+            # As in Atomic Memory, unchanged content adds no revision and records no new evidence.
             if expected_revision is not None and expected_revision != current.artifact.revision:
                 raise owner.service.errors.conflict("the Artifact changed after it was read")  # noqa: TRY003
             return _snapshot(current)
@@ -348,49 +427,69 @@ class PluginArtifactTransaction(_Reads):
             owner.scope_id,
             artifact_id,
             body,
-            None,
+            owner.context,
             expected_revision=None
             if current is None
             else (current.artifact.revision if expected_revision is None else expected_revision),
             lineage=ArtifactLineage(sources=tuple(source_refs), artifacts=tuple(artifact_refs)),
         )
-        return await self._commit(plan)
+        direct = None
+        if change is not None:
+            # Like built-in edits, the submitted content is kept as a lineage-only Source of the new revision.
+            direct = await _lineage_source(
+                self._connection,
+                owner,
+                artifact_id,
+                content,
+                "artifact_create" if current is None else "artifact_replace",
+                1 if current is None else current.artifact.revision + 1,
+            )
+        return _snapshot((await self._committed(plan, direct)).primary)
 
-    async def revert(self, artifact_id: str, /, *, to_revision: int) -> ArtifactSnapshot:
+    async def revert(self, artifact_id: str, /, *, to_revision: int) -> ArtifactChange:
         self._admit()
+        self._agree("revert", artifact_id)
         owner = self._owner
         plan = await owner.service.inspect_restore(
-            self._connection, owner.scope_id, artifact_id, None, operation="restore", revision=to_revision
+            self._connection, owner.scope_id, artifact_id, owner.context, operation="restore", revision=to_revision
         )
-        return await self._commit(plan)
+        return await self._commit_change(plan, artifact_id)
 
     async def set_lifecycle(
         self, artifact_id: str, state: LifecycleState, /, *, replacement_artifact_id: str | None = None
-    ) -> ArtifactSnapshot:
+    ) -> ArtifactChange:
         self._admit()
         owner = self._owner
-        current = await self._require(artifact_id)
         requested = ArtifactLifecycleState(state)
+        self._agree(
+            "deprecate"
+            if requested is ArtifactLifecycleState.DEPRECATED and replacement_artifact_id is None
+            else "activate"
+            if requested is ArtifactLifecycleState.ACTIVE
+            else "transition",
+            artifact_id,
+        )
+        current = await self._require(artifact_id)
         if current.state.lifecycle_state is requested and current.state.replacement_artifact_id == (
             replacement_artifact_id
         ):
-            return _snapshot(current)
+            return ArtifactChange(artifact=_snapshot(current))
         if requested is ArtifactLifecycleState.DEPRECATED and replacement_artifact_id is None:
             plan = await owner.service.inspect_forget(
                 self._connection,
                 owner.scope_id,
                 artifact_id,
-                None,
+                owner.context,
                 expected_revision=current.artifact.revision,
                 expected_state_version=current.state.governance_generation,
             )
-            return await self._commit(plan)
+            return await self._commit_change(plan, artifact_id)
         if requested is ArtifactLifecycleState.ACTIVE:
             # Shared restoration also undoes the merges that froze an input, as one group.
             plan = await owner.service.inspect_restore(
-                self._connection, owner.scope_id, artifact_id, None, operation="restore"
+                self._connection, owner.scope_id, artifact_id, owner.context, operation="restore"
             )
-            return await self._commit(plan)
+            return await self._commit_change(plan, artifact_id)
         await owner.states.transition(
             self._connection,
             owner.scope_id,
@@ -402,7 +501,7 @@ class PluginArtifactTransaction(_Reads):
         )
         # Only deprecation with a replacement and retirement reach here; both leave search.
         await publish_search_text(self._connection, owner.scope_id, owner.family, artifact_id, None, None)
-        return _snapshot(await self._require(artifact_id))
+        return ArtifactChange(artifact=_snapshot(await self._require(artifact_id)))
 
     async def merge(
         self,
@@ -415,7 +514,11 @@ class PluginArtifactTransaction(_Reads):
         artifact_refs: Sequence[ArtifactRef] = (),
     ) -> ArtifactSnapshot:
         self._admit(content, source_refs)
+        self._agree("merge", into)
         owner = self._owner
+        change = owner.change
+        if change is not None and tuple(inputs) != change.inputs:
+            raise PluginContractError("merge_artifacts must merge exactly the requested inputs")  # noqa: TRY003
         records = [await self._require(identity) for identity in inputs]
         result = await self._record(self._connection, into)
         if result is not None and all(record.state.merged_into_id == into for record in records):
@@ -431,7 +534,7 @@ class PluginArtifactTransaction(_Reads):
             into,
             reads,
             owner.body(content),
-            None,
+            owner.context,
             lineage=lineage,
         )
         return await self._commit(plan)
@@ -439,7 +542,7 @@ class PluginArtifactTransaction(_Reads):
     async def _undo_plan(self, artifact_id: str):
         owner = self._owner
         return await owner.service.inspect_restore(
-            self._connection, owner.scope_id, artifact_id, None, operation="undo_merge"
+            self._connection, owner.scope_id, artifact_id, owner.context, operation="undo_merge"
         )
 
     async def preview_undo_merge(self, artifact_id: str, /) -> UndoMergePreview:
@@ -457,15 +560,18 @@ class PluginArtifactTransaction(_Reads):
 
     async def undo_merge(self, artifact_id: str, /) -> UndoMergePreview:
         self._admit()
+        self._agree("undo_merge", artifact_id)
         owner = self._owner
         prepared = await owner.service.prepare_change(await self._undo_plan(artifact_id))
-        result = await owner.service.commit(self._connection, prepared, None)
+        result = await owner.service.commit(self._connection, prepared, owner.context)
+        owner.outcome = (result.restored, result.retired, result.undo_merge_results)
         return UndoMergePreview(
             restore=result.restored, retire=result.retired, undo_merge_results=result.undo_merge_results
         )
 
     async def bind_handle(self, handle_key: str, ref: ArtifactRef, /) -> ArtifactRef:
         self._admit()
+        self._agree("handle", ref.artifact_id)
         owner = self._owner
         if ref.family != owner.family:
             raise PluginWriteError("handles must bind this plugin's family")  # noqa: TRY003
@@ -488,6 +594,7 @@ class PluginArtifactTransaction(_Reads):
 
     async def set_tags(self, artifact_id: str, tags: Sequence[str], /) -> tuple[str, ...]:
         self._admit()
+        self._agree("tags", artifact_id)
         owner = self._owner
         await owner.artifacts.lock_heads(
             self._connection,
@@ -539,7 +646,12 @@ class PluginArtifactWriter(_Reads):
         complete: Callable[[AsyncConnection], Awaitable[None]] = _nothing,
         transaction_timeout_seconds: float = 30,
         security: Any = None,
+        context: Any = None,
+        change: UserChange | None = None,
+        caller_scoped: bool = False,
     ) -> None:
+        """``caller_scoped`` writers act as ``context``'s caller under the shared Artifact access policy."""
+
         self.database = database
         self.scope_id = scope_id
         self._family = family
@@ -548,9 +660,19 @@ class PluginArtifactWriter(_Reads):
         self._begin = begin
         self._complete = complete
         self._timeout = transaction_timeout_seconds
-        self.service = plugin_merge_service(family, _Security(family, security), sources)
+        self.context = context
+        self.change = change
+        self.service = plugin_merge_service(
+            family,
+            ArtifactMergeAccess(family) if caller_scoped or change is not None else _Security(family, security),
+            sources,
+        )
         self.artifacts = self.service.artifacts
         self.states = ArtifactGovernanceRepository()
+        self.sources = sources
+        self.observed: dict[str, int] = {}
+        # Restored and retired refs of the last lifecycle write, which user changes report back.
+        self.outcome: tuple[tuple[ArtifactRef, ...], tuple[ArtifactRef, ...], tuple[str, ...]] = ((), (), ())
         self.opened = False
         self.committed = False
 
@@ -560,6 +682,11 @@ class PluginArtifactWriter(_Reads):
                 yield connection
 
         super().__init__(self, committed_read)
+
+    @override
+    def _seen(self, snapshots: Sequence[ArtifactSnapshot]) -> None:
+        for snapshot in snapshots:
+            self.observed.setdefault(snapshot.ref.artifact_id, snapshot.ref.revision)
 
     @property
     def family(self) -> str:
@@ -587,6 +714,8 @@ class PluginArtifactWriter(_Reads):
                 yield transaction
             finally:
                 transaction.closed = True
+            if self.change is not None and transaction.agreed != 1:
+                raise PluginContractError(f"{self.change.operation} must complete its agreed write")  # noqa: TRY003
             await self._complete(connection)
         self.committed = True
 
@@ -607,47 +736,31 @@ def plugin_merge_service(family: str, security: Any, sources: SourceRepository) 
     )
 
 
-async def replace_plugin_artifact(
-    database: Any,
-    spec: ArtifactPluginSpec,
-    scope_id: str,
+async def _lineage_source(
+    connection: AsyncConnection,
+    owner: PluginArtifactWriter,
     artifact_id: str,
     content: dict[str, JsonValue],
-    *,
-    expected_revision: int,
-) -> ArtifactSnapshot:
-    """Commit a user's complete replacement without plugin code.
+    operation: Literal["artifact_create", "artifact_replace"],
+    revision: int,
+) -> SourceRef:
+    """Keep submitted content as a lineage-only Source; it never enters a plugin's input window."""
 
-    Like built-in edits, the submitted content is kept as a lineage-only Source bound to
-    the new revision; it never enters a plugin's input window.
-    """
-
-    sources = SourceRepository(BUILTIN_SOURCE_REGISTRY)
-    writer = PluginArtifactWriter(
-        database=database, scope_id=scope_id, family=spec.family, sources=sources, search_fields=spec.search_fields
-    )
-    service = writer.service
-    async with asyncio.timeout(spec.transaction_timeout_seconds), database.transaction() as connection:
-        plan = await service.inspect_change(
-            connection, scope_id, artifact_id, writer.body(content), None, expected_revision=expected_revision
-        )
-        source = ContentSource(
-            name=f"src_{uuid4().hex}",
-            materialization=SourceMaterialization.CAPTURED,
-            content=_canonical_source_text(cast(JsonValue, content)),
-            wire_content=content,
-            wire_content_present=True,
-            internal=ContentSourceInternal(
-                role="lineage_only",
-                operation="artifact_replace",
-                target=ContentSourceTarget(
-                    scope_id=scope_id, family=spec.family, artifact_id=artifact_id, revision=expected_revision + 1
-                ),
+    source = ContentSource(
+        name=f"src_{uuid4().hex}",
+        materialization=SourceMaterialization.CAPTURED,
+        content=_canonical_source_text(cast(JsonValue, content)),
+        wire_content=content,
+        wire_content_present=True,
+        internal=ContentSourceInternal(
+            role="lineage_only",
+            operation=operation,
+            target=ContentSourceTarget(
+                scope_id=owner.scope_id, family=owner.family, artifact_id=artifact_id, revision=revision
             ),
-        )
-        stored = await sources.add(connection, scope_id, source)
-        result = await service.commit(connection, await service.prepare_change(plan), None, direct_source=stored.ref)
-    return _snapshot(result.primary)
+        ),
+    )
+    return (await owner.sources.add(connection, owner.scope_id, source)).ref
 
 
 def _snapshot(record: ArtifactMergeRecord) -> ArtifactSnapshot:

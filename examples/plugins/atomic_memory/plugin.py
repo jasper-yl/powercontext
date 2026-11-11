@@ -59,9 +59,12 @@ from powercontext.plugins import (
     ArtifactSnapshot,
     ArtifactTransaction,
     ArtifactWriter,
+    ForgetRequest,
     GenerateRequest,
     Inputs,
+    InvalidContent,
     PluginContext,
+    UpdateRequest,
 )
 
 ENVIRONMENT_PREFIX = "ATOMIC_MEMORY_PLUGIN_"
@@ -75,7 +78,8 @@ class Config(BaseModel):
     model_timeout_seconds: float = Field(default=120, gt=0)
     related_limit: int = Field(default=20, ge=1, le=200)
     comparison_batch_size: int = Field(default=8, ge=1)
-    index_path: str = "memory-index.sqlite3"
+    # Defaults to the dedicated storage core allocates; the plugin directory holds only code.
+    index_path: str | None = None
     index_threshold: float = Field(default=0.6, ge=0, le=1)
 
     @classmethod
@@ -98,6 +102,22 @@ class AtomicMemoryPlugin:
         self.config = config
         self.pipeline = pipeline
         self.index = index
+
+    async def update_artifact(self, request: UpdateRequest, writer: ArtifactWriter) -> None:
+        if not isinstance(request.content.get("text"), str) or not isinstance(request.content.get("kind"), str):
+            raise InvalidContent("a memory needs text and kind strings", field="text")  # noqa: TRY003
+        async with writer.transaction() as tx:
+            written = await tx.put(
+                request.artifact_id, content=request.content, expected_revision=request.expected_revision
+            )
+            await self.index.upsert(
+                request.scope_id, written.ref.artifact_id, written.ref.revision, request.content["text"]
+            )
+
+    async def forget_artifact(self, request: ForgetRequest, writer: ArtifactWriter) -> None:
+        async with writer.transaction() as tx:
+            await tx.set_lifecycle(request.artifact_id, "deprecated")
+            await self.index.remove(request.scope_id, request.artifact_id)
 
     async def generate(self, request: GenerateRequest, writer: ArtifactWriter) -> None:
         workset = await self._decide(request, writer)
@@ -308,9 +328,7 @@ async def _pipeline(config: Config, ctx: PluginContext) -> AtomicMemoryGeneratio
 
 async def create(ctx: PluginContext) -> AtomicMemoryPlugin:
     config = Config.from_environment()
-    path = Path(config.index_path)
-    if not path.is_absolute():
-        path = ctx.plugin_dir / path
+    path = Path(ctx.storage.engine().url.database or "") if config.index_path is None else Path(config.index_path)
     index = await ctx.enter_async_context(MemoryIndex(path))
     pipeline = await _pipeline(config, ctx)
     return AtomicMemoryPlugin(ctx, config, pipeline, index)

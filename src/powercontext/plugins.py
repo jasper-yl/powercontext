@@ -16,13 +16,14 @@
 
 A plugin directory holds ``plugin.py``, which assigns an ``ArtifactPlugin`` declaration
 to ``plugin``. The declaration tells core which Sources to deliver and when; its
-``create`` factory returns an object with one method, ``generate(request, writer)``.
+``create`` factory returns an object with ``generate(request, writer)`` and, optionally,
+the user-change methods and the handlers of the plugin's own HTTP routes.
 Slow work such as model calls runs outside the writer; Artifact writes run inside one
 short ``async with writer.transaction()`` block, which core commits together with the
 consumption cursor and the invocation acknowledgment.
 
-Callers never call plugins. They write Sources and read or change Artifacts through
-the existing Source and Artifact APIs.
+Callers reach plugins through the existing Source and Artifact APIs, and through the
+routes a plugin declares under ``/v1/plugins/{name}/api/``.
 """
 
 from __future__ import annotations
@@ -32,12 +33,15 @@ from collections.abc import Awaitable, Callable, Collection, Sequence
 from contextlib import AbstractAsyncContextManager, AsyncExitStack
 from datetime import timedelta
 from pathlib import Path
-from typing import Annotated, Literal, Protocol, TypeVar
+from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol, TypeVar
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, field_validator, model_validator
 
 from powercontext.artifacts import ArtifactLineage, ArtifactRef
 from powercontext.sources import SourceProjectionKey, SourceRef
+
+if TYPE_CHECKING:
+    from sqlalchemy.ext.asyncio import AsyncEngine
 
 ResourceT = TypeVar("ResourceT")
 LifecycleState = Literal["active", "deprecated", "retired"]
@@ -88,6 +92,77 @@ class Inputs(BaseModel):
         return SourceProjectionKey(name=name, version=version)
 
 
+class RouteSpec(BaseModel):
+    """The data part of one plugin route: what core needs to mount and authorize it."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
+
+    method: Literal["GET", "POST", "PUT", "PATCH", "DELETE"]
+    path: str = Field(pattern=r"^/[A-Za-z0-9._~{}/-]*$", max_length=512)
+    handler: str = Field(pattern=r"^[a-z_][a-z0-9_]*$")
+    access: Literal["authenticated", "scope.read", "scope.contribute"]
+    scope_param: str | None = None
+    body: Literal["none", "json", "binary"] = "none"
+    timeout_seconds: float = Field(default=30, gt=0)
+    description: str | None = None
+    mcp: bool = False
+    request_schema: dict[str, JsonValue] | None = None
+    response_schema: dict[str, JsonValue] | None = None
+
+    @model_validator(mode="after")
+    def consistent(self) -> RouteSpec:
+        parameters = set(_path_parameters(self.path))
+        if self.access == "authenticated":
+            if self.scope_param is not None:
+                raise ValueError("authenticated routes do not take scope_param")  # noqa: TRY003
+        elif self.scope_param not in parameters:
+            raise ValueError("Scope routes must name a path parameter as scope_param")  # noqa: TRY003
+        if self.mcp and (self.body == "binary" or not self.description):
+            raise ValueError("MCP routes need a description and a JSON or empty body")  # noqa: TRY003
+        return self
+
+
+class PluginApiSpec(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    routes: tuple[RouteSpec, ...] = Field(min_length=1, max_length=200)
+
+    @model_validator(mode="after")
+    def unique_routes(self) -> PluginApiSpec:
+        keys = [(route.method, route.path) for route in self.routes]
+        if len(set(keys)) != len(keys):
+            raise ValueError("routes must be unique by method and path")  # noqa: TRY003
+        return self
+
+
+class Route(RouteSpec):
+    """One HTTP route a plugin declares; its handler is a method of the ``create`` result."""
+
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    request_model: type[BaseModel] | None = Field(default=None, exclude=True)
+    response_model: type[BaseModel] | None = Field(default=None, exclude=True)
+
+    @model_validator(mode="after")
+    def describe_models(self) -> Route:
+        # Schemas cross process boundaries; the classes themselves stay in the plugin.
+        if self.request_model is not None and self.body != "json":
+            raise ValueError("request_model requires a JSON body")  # noqa: TRY003
+        object.__setattr__(
+            self, "request_schema", None if self.request_model is None else self.request_model.model_json_schema()
+        )
+        object.__setattr__(
+            self, "response_schema", None if self.response_model is None else self.response_model.model_json_schema()
+        )
+        return self
+
+
+class PluginApi(PluginApiSpec):
+    model_config = ConfigDict(arbitrary_types_allowed=True)
+
+    routes: tuple[Route, ...] = Field(min_length=1, max_length=200)
+
+
 class ArtifactPluginSpec(BaseModel):
     """The data part of a declaration: what core needs before it runs plugin code."""
 
@@ -105,6 +180,9 @@ class ArtifactPluginSpec(BaseModel):
     max_workers: int = Field(default=1, ge=1)
     timeout_seconds: float = Field(default=300, gt=0)
     transaction_timeout_seconds: float = Field(default=30, gt=0)
+    # Time limit of one user change or plugin API call in the host process.
+    change_timeout_seconds: float = Field(default=30, gt=0)
+    api: PluginApiSpec | None = None
 
     @field_validator("family")
     @classmethod
@@ -188,20 +266,141 @@ class UndoMergePreview(BaseModel):
     undo_merge_results: tuple[str, ...]
 
 
+class ArtifactChange(BaseModel):
+    """A lifecycle change and the other Artifacts the shared flow restored or retired with it."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    artifact: ArtifactSnapshot
+    restored: tuple[ArtifactRef, ...] = ()
+    retired: tuple[ArtifactRef, ...] = ()
+
+
+class PluginStorage(Protocol):
+    """The plugin's dedicated area on the deployment's database backend, outside core's transactions."""
+
+    @property
+    def backend(self) -> Literal["sqlite", "oceanbase", "seekdb"]: ...
+
+    def engine(self) -> AsyncEngine: ...
+
+
+class PluginModels(Protocol):
+    """Server's configured models; addresses and credentials stay with core."""
+
+    @property
+    def embedding_dimension(self) -> int | None: ...
+
+    async def embed(self, texts: Sequence[str], /) -> tuple[tuple[float, ...], ...]: ...
+
+
+class Caller(BaseModel):
+    """The authenticated caller of a user change or plugin route; carries no credentials."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    principal_id: str
+
+
+class AccessDenied(Exception):
+    """``ctx.require`` found the caller without the permission; the route returns 403."""
+
+
 class PluginContext:
-    """Per-invocation context; resources registered here close when the call ends."""
+    """Context of one Worker invocation, or of a host process for every Scope it serves.
+
+    In a Worker ``scope_id`` is the invocation Scope. In the host process it is None,
+    each request carries its Scope, and the request helpers below act as that
+    request's caller. Resources registered here close when the call or process ends.
+    """
 
     def __init__(
-        self, *, name: str, scope_id: str, plugin_dir: Path, logger: logging.Logger, resources: AsyncExitStack
+        self,
+        *,
+        name: str,
+        scope_id: str | None,
+        plugin_dir: Path,
+        logger: logging.Logger,
+        resources: AsyncExitStack,
+        storage: PluginStorage | None = None,
+        models: PluginModels | None = None,
+        host: Any = None,
     ) -> None:
         self.name = name
         self.scope_id = scope_id
         self.plugin_dir = plugin_dir
         self.logger = logger
+        self.models = models
+        self._storage = storage
         self._resources = resources
+        self._host = host
+
+    @property
+    def storage(self) -> PluginStorage:
+        if self._storage is None:
+            raise RuntimeError("dedicated plugin storage is unavailable")  # noqa: TRY003
+        return self._storage
 
     async def enter_async_context(self, manager: AbstractAsyncContextManager[ResourceT]) -> ResourceT:
         return await self._resources.enter_async_context(manager)
+
+    def _request_host(self) -> Any:
+        if self._host is None:
+            raise RuntimeError("request helpers are available only while the host process serves a request")  # noqa: TRY003
+        return self._host
+
+    @property
+    def caller(self) -> Caller:
+        return self._request_host().caller()
+
+    async def require(
+        self, action: Literal["scope.read", "scope.contribute", "server.admin"], scope_id: str | None = None
+    ) -> None:
+        await self._request_host().require(action, scope_id)
+
+    async def allowed(
+        self, action: Literal["scope.read", "scope.contribute", "server.admin"], scope_id: str | None = None
+    ) -> bool:
+        try:
+            await self.require(action, scope_id)
+        except AccessDenied:
+            return False
+        return True
+
+    def reads(self, scope_id: str) -> ArtifactReads:
+        return self._request_host().reads(scope_id)
+
+    def writer(self, scope_id: str) -> ArtifactWriter:
+        return self._request_host().writer(scope_id)
+
+    @property
+    def sources(self) -> PluginSources:
+        return self._request_host().sources()
+
+    @property
+    def scopes(self) -> PluginScopes:
+        return self._request_host().scopes()
+
+
+class PluginSources(Protocol):
+    async def submit(self, scope_id: str, definition: str, value: BaseModel, /) -> SourceRef: ...
+
+
+class PluginScope(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    scope_id: str
+    title: str
+    summary: str
+    version: int
+
+
+class PluginScopes(Protocol):
+    async def create(self, *, title: str, summary: str, idempotency_key: str) -> PluginScope: ...
+
+    async def update(self, scope_id: str, /, *, expected_version: int, title: str, summary: str) -> PluginScope: ...
+
+    async def list(self) -> tuple[PluginScope, ...]: ...
 
 
 class ArtifactReads(Protocol):
@@ -286,16 +485,134 @@ class ArtifactGenerator(Protocol):
     async def generate(self, request: GenerateRequest, writer: ArtifactWriter, /) -> None: ...
 
 
+class CreateRequest(BaseModel):
+    """A user creates an Artifact; core allocated ``artifact_id``."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    scope_id: str
+    artifact_id: str
+    content: dict[str, JsonValue]
+    caller: Caller | None = None
+
+
+class UpdateRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    scope_id: str
+    artifact_id: str
+    expected_revision: int
+    content: dict[str, JsonValue]
+    caller: Caller | None = None
+
+
+class MergeInput(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    artifact_id: str
+    revision: int
+    state_version: int
+
+
+class MergeRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    scope_id: str
+    inputs: tuple[MergeInput, ...]
+    into: str
+    content: dict[str, JsonValue]
+    caller: Caller | None = None
+
+
+class ForgetRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    scope_id: str
+    artifact_id: str
+    expected_revision: int
+    expected_state_version: int
+    caller: Caller | None = None
+
+
+class RestoreRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    scope_id: str
+    artifact_id: str
+    operation: Literal["restore", "undo_merge"] = "restore"
+    revision: int | None = None
+    caller: Caller | None = None
+
+
+class InvalidContent(Exception):
+    """The plugin rejects content a user submitted; the API returns 422 with this message."""
+
+    def __init__(self, message: str, *, field: str | None = None) -> None:
+        super().__init__(message)
+        self.message = message
+        self.field = field
+
+
+class ApiRequest(BaseModel):
+    """One call to a plugin route, after core authenticated the caller and read the body."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, arbitrary_types_allowed=True)
+
+    scope_id: str | None
+    route: str
+    path_params: dict[str, str]
+    query: dict[str, list[str]]
+    body: Any = None
+    caller: Caller
+
+
+class BinaryResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    content: bytes
+    content_type: str
+    filename: str | None = None
+
+
+class ApiError(Exception):
+    """A handler's 4xx answer; core decides 401 and 403 itself."""
+
+    def __init__(self, status: int, code: str, message: str) -> None:
+        if not 400 <= status <= 499 or status in {401, 403}:
+            raise ValueError("ApiError status must be a 4xx other than 401 and 403")  # noqa: TRY003
+        super().__init__(message)
+        self.status = status
+        self.code = code
+        self.message = message
+
+
+USER_CHANGE_METHODS = ("create_artifact", "update_artifact", "merge_artifacts", "forget_artifact", "restore_artifact")
+
+
 class ArtifactPlugin(ArtifactPluginSpec):
     """The declaration ``plugin.py`` assigns to ``plugin``; the plugin name is its directory name."""
 
     model_config = ConfigDict(arbitrary_types_allowed=True)
 
-    # Called once per invocation inside the Worker; read deployment settings from the environment here.
+    # Called once per Worker invocation, and once per host process; read deployment settings from the environment here.
     create: Callable[[PluginContext], Awaitable[ArtifactGenerator]] = Field(exclude=True)
+    # Source Definitions this plugin's own routes submit; their manifests register when the plugin loads.
+    definitions: tuple[Any, ...] = Field(default=(), exclude=True)
+    api: PluginApi | None = None
+
+
+def _path_parameters(path: str) -> tuple[str, ...]:
+    import re
+
+    return tuple(re.findall(r"{([A-Za-z_][A-Za-z0-9_]*)}", path))
 
 
 __all__ = [
+    "USER_CHANGE_METHODS",
+    "AccessDenied",
+    "ApiError",
+    "ApiRequest",
+    "ArtifactChange",
     "ArtifactGenerator",
     "ArtifactPage",
     "ArtifactPlugin",
@@ -304,12 +621,30 @@ __all__ = [
     "ArtifactSnapshot",
     "ArtifactTransaction",
     "ArtifactWriter",
+    "BinaryResponse",
+    "Caller",
+    "CreateRequest",
     "Cron",
+    "ForgetRequest",
     "GenerateRequest",
     "GenerationSource",
     "Inputs",
     "Interval",
+    "InvalidContent",
     "LifecycleState",
+    "MergeInput",
+    "MergeRequest",
+    "PluginApi",
+    "PluginApiSpec",
     "PluginContext",
+    "PluginModels",
+    "PluginScope",
+    "PluginScopes",
+    "PluginSources",
+    "PluginStorage",
+    "RestoreRequest",
+    "Route",
+    "RouteSpec",
     "UndoMergePreview",
+    "UpdateRequest",
 ]

@@ -21,6 +21,7 @@ in a child process; the declaration crosses process boundaries as ``PluginManife
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import inspect
 import re
@@ -28,7 +29,7 @@ import sys
 from pathlib import Path
 from types import ModuleType
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, ValidationError
 
 from powercontext.plugins import ArtifactPlugin, ArtifactPluginSpec
 
@@ -47,10 +48,30 @@ class PluginManifest(BaseModel):
 
     name: str = Field(pattern=_NAME.pattern)
     spec: ArtifactPluginSpec
+    # Content digest of the plugin directory when it was checked; see ``code_fingerprint``.
+    fingerprint: str = ""
+    # Declarative manifests of the Source Definitions the plugin submits through its routes.
+    source_manifests: tuple[dict[str, JsonValue], ...] = ()
 
     @property
     def binding_name(self) -> str:
         return f"plugin:{self.name}"
+
+
+def code_fingerprint(directory: Path) -> str:
+    """SHA-256 over relative paths and contents, so any content change shows, whatever the timestamps."""
+
+    root = directory.resolve()
+    digest = hashlib.sha256()
+    files = sorted(
+        path for path in root.rglob("*") if path.is_file() and "__pycache__" not in path.relative_to(root).parts
+    )
+    for path in files:
+        digest.update(str(path.relative_to(root)).encode())
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
 
 
 def load_module(directory: Path) -> ModuleType:
@@ -87,7 +108,20 @@ def load_plugin(directory: Path) -> tuple[PluginManifest, ArtifactPlugin]:
     except ValidationError as error:
         fields = ", ".join(".".join(str(part) for part in item["loc"]) or "plugin" for item in error.errors())
         raise PluginConfigError(f"invalid declaration fields: {fields}") from error  # noqa: TRY003
-    return PluginManifest(name=name, spec=spec), declaration
+    from powercontext.sources.observations import manifest_for_definition
+
+    try:
+        source_manifests = tuple(
+            manifest_for_definition(definition).model_dump(mode="json") for definition in declaration.definitions
+        )
+    except Exception as error:
+        raise PluginConfigError("invalid Source Definitions") from error  # noqa: TRY003
+    return (
+        PluginManifest(
+            name=name, spec=spec, fingerprint=code_fingerprint(directory), source_manifests=source_manifests
+        ),
+        declaration,
+    )
 
 
 def main() -> None:

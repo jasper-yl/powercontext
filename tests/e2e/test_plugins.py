@@ -30,6 +30,27 @@ class Notes:
                 text = source.projection["content"]
                 await tx.put(writer.stable_id(source.ref.source_id), content={"text": text}, source_refs=[source.ref])
 
+    async def update_artifact(self, request, writer) -> None:
+        async with writer.transaction() as tx:
+            await tx.put(request.artifact_id, content=request.content, expected_revision=request.expected_revision)
+
+    async def forget_artifact(self, request, writer) -> None:
+        async with writer.transaction() as tx:
+            await tx.set_lifecycle(request.artifact_id, "deprecated")
+
+    async def merge_artifacts(self, request, writer) -> None:
+        async with writer.transaction() as tx:
+            await tx.merge([item.artifact_id for item in request.inputs], into=request.into, content=request.content)
+
+    async def restore_artifact(self, request, writer) -> None:
+        async with writer.transaction() as tx:
+            if request.operation == "undo_merge":
+                await tx.undo_merge(request.artifact_id)
+            elif request.revision is not None:
+                await tx.revert(request.artifact_id, to_revision=request.revision)
+            else:
+                await tx.set_lifecycle(request.artifact_id, "active")
+
 
 async def create(ctx):
     return Notes()
@@ -85,7 +106,7 @@ def test_server_loads_plugins_dispatches_on_sources_and_serves_the_artifact_api(
             state = (await wait_for(progress, lambda value: not value[scope]["pending"], log=log))[scope]
             assert state["consumed_position"] == state["source_position"]
 
-            # Users change plugin Artifacts through the generic Artifact API; core runs it without the plugin.
+            # Users change plugin Artifacts through the generic Artifact API; the plugin's host process applies it.
             target = next(key for key, text in bodies.items() if "east" in text)
             path = f"/v1/scopes/{scope}/artifacts/notes/{target}"
             edited = await client.put(

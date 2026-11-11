@@ -1413,6 +1413,7 @@ def create_app(
     app.openapi_version = OPENAPI_VERSION
     app.state.artifact_plugin_manager = None
     app.state.plugin_manager = None
+    app.state.plugin_api_max_body_bytes = 32 * 1024 * 1024
     app.state.artifact_declaration_provider = None
     app.state.artifact_access_refresher = None
     app.state.application = application
@@ -1482,6 +1483,7 @@ def create_app(
     @app.exception_handler(BaseAccessError)
     @app.exception_handler(PromptError)
     @app.exception_handler(SourceNotEligibleError)
+    @app.exception_handler(PluginCallError)
     @app.exception_handler(PowerContextError)
     @app.exception_handler(PersistenceError)
     async def application_error(request: Request, error: Exception) -> JSONResponse:
@@ -1515,6 +1517,13 @@ def create_app(
     _add_route(app, GET_CAPABILITIES, get_capabilities)
     _add_route(app, LIST_PLUGINS, list_plugins)
     _add_route(app, GET_PLUGIN, get_plugin)
+    # Plugin routes are outside the main contract; core authenticates, the plugin host authorizes.
+    app.router.add_api_route(
+        "/v1/plugins/{name}/api/{path:path}",
+        call_plugin_api,
+        methods=["GET", "POST", "PUT", "PATCH", "DELETE"],
+        include_in_schema=False,
+    )
     _add_route(app, LIST_PLUGIN_SCOPES, list_plugin_scopes)
     _add_route(app, GET_ARTIFACT_GOVERNANCE, get_artifact_governance)
     _add_route(app, MERGE_ARTIFACTS, merge_artifacts)
@@ -1926,6 +1935,24 @@ async def merge_artifacts(
     request: MergeArtifactsRequest,
     http_request: Request,
 ) -> ArtifactGovernanceResponse:
+    found = _plugin_family_host(http_request, family)
+    if found is not None:
+        manifest, host = found
+        result = await _call_plugin_host(
+            http_request,
+            host,
+            "merge_artifacts",
+            scope_id=scope_id,
+            payload={
+                "inputs": [item.model_dump(mode="json") for item in request.inputs],
+                "content": request.content,
+            },
+            timeout=manifest.spec.change_timeout_seconds,
+            operation="merge_artifacts",
+        )
+        inputs = [item.artifact_id for item in request.inputs]
+        merged = result["artifact"]["ref"]["artifact_id"]
+        return await _plugin_governance(http_request, scope_id, family, [merged, *inputs])
     scoped = _merge_scope(http_request, scope_id, family)
     content = _merge_content(http_request, family, request.content)
     inputs = tuple(
@@ -1957,6 +1984,23 @@ async def forget_artifact(
     request: ForgetArtifactRequest,
     http_request: Request,
 ) -> ArtifactGovernanceResponse:
+    found = _plugin_family_host(http_request, family)
+    if found is not None:
+        manifest, host = found
+        await _call_plugin_host(
+            http_request,
+            host,
+            "forget_artifact",
+            scope_id=scope_id,
+            payload={
+                "artifact_id": artifact_id,
+                "expected_revision": request.revision,
+                "expected_state_version": request.state_version,
+            },
+            timeout=manifest.spec.change_timeout_seconds,
+            operation="forget_artifact",
+        )
+        return await _plugin_governance(http_request, scope_id, family, [artifact_id])
     result = await _merge_scope(http_request, scope_id, family).forget(
         artifact_id,
         expected_revision=request.revision,
@@ -1973,6 +2017,28 @@ async def restore_artifact(
     request: RestoreArtifactRequest,
     http_request: Request,
 ) -> ArtifactRestorationResult:
+    found = _plugin_family_host(http_request, family)
+    if found is not None:
+        manifest, host = found
+        result = await _call_plugin_host(
+            http_request,
+            host,
+            "restore_artifact",
+            scope_id=scope_id,
+            payload={
+                "artifact_id": artifact_id,
+                "operation": (request.operation or ArtifactRestorationOperation.RESTORE).value,
+                "revision": request.revision,
+            },
+            timeout=manifest.spec.change_timeout_seconds,
+            operation="restore_artifact",
+        )
+        return ArtifactRestorationResult(
+            changed=True,
+            restored=[_artifact_reference(ArtifactRef.model_validate(item)) for item in result["restored"]],
+            retired=[_artifact_reference(ArtifactRef.model_validate(item)) for item in result["retired"]],
+            undo_merge_results=result["undo_merge_results"],
+        )
     result = await _merge_scope(http_request, scope_id, family).restore(
         artifact_id,
         operation=(request.operation or ArtifactRestorationOperation.RESTORE).value,
@@ -3325,6 +3391,75 @@ async def replace_artifact(
     return _artifact_revision_response(result)
 
 
+class PluginCallError(Exception):
+    """A plugin host outcome that becomes the shared HTTP error envelope."""
+
+    def __init__(self, status_code: int, code: str, message: str, details: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.status = status_code
+        self.code = code
+        self.message = message
+        self.details = details
+
+
+_PLUGIN_OUTCOMES = {
+    "not_implemented": (422, "plugin_operation_not_supported", "The plugin does not support this operation."),
+    "forbidden": (403, "access_denied", "The caller is not allowed to perform this operation."),
+    "not_found": (404, "not_found", "The requested resource was not found."),
+    "precondition_failed": (412, "precondition_failed", "The Artifact changed after it was read."),
+    "conflict": (409, "conflict", "The Artifact changed after it was read."),
+    "contract_violation": (502, "plugin_contract_violation", "The plugin did not complete its agreed write."),
+    "error": (500, "plugin_error", "The plugin failed."),
+}
+
+
+async def _call_plugin_host(
+    http_request: Request,
+    host: Any,
+    method: str,
+    *,
+    scope_id: str | None,
+    payload: dict[str, Any],
+    timeout: float,  # noqa: ASYNC109 - forwarded to the host as its deadline
+    operation: str,
+    body: Any = None,
+) -> Any:
+    """Forward an authenticated request to the plugin host and translate its outcome."""
+
+    from powercontext.server.plugin_hosts import PluginHostUnavailable
+
+    access = access_control_for_mode(http_request.app.state.access_control, mode=http_request.app.state.access_mode)
+    caller = None if access is None else _require_principal()
+    audit = None if access is None else _access_audit_context(operation)
+    try:
+        response = await host.call(
+            method, scope_id=scope_id, caller=caller, audit=audit, payload=payload, body=body, timeout=timeout
+        )
+    except PluginHostUnavailable:
+        raise PluginCallError(503, "plugin_unavailable", "The plugin is temporarily unavailable.") from None
+    if response.outcome == "ok":
+        return response.result
+    if response.outcome == "invalid_content":
+        details = None if response.field is None else {"field": response.field}
+        raise PluginCallError(422, "invalid_content", response.message or "The plugin rejected the content.", details)
+    if response.outcome == "api_error":
+        raise PluginCallError(response.status or 400, response.field or "plugin_error", response.message or "")
+    status_code, code, message = _PLUGIN_OUTCOMES[response.outcome]
+    raise PluginCallError(status_code, code, message)
+
+
+def _plugin_family_host(http_request: Request, family: str) -> tuple[Any, Any] | None:
+    manager = http_request.app.state.plugin_manager
+    return None if manager is None else manager.host_for_family(family)
+
+
+async def _plugin_governance(http_request: Request, scope_id: str, family: str, ids: Sequence[str]):
+    scoped = _merge_scope(http_request, scope_id, family)
+    context = _merge_execution_context(http_request, "get_artifact_governance")
+    records = [await scoped.get(artifact_id, context=context) for artifact_id in ids]
+    return ArtifactGovernanceResponse(changed=True, records=[_governance_record(record) for record in records])
+
+
 async def _replace_plugin_artifact(
     scope_id: str,
     family: str,
@@ -3335,21 +3470,91 @@ async def _replace_plugin_artifact(
     if_match: str | None,
 ) -> ArtifactRevision:
     expected_etag = _require_artifact_etag(if_match)
-    # Plugin content is opaque: store the submitted JSON, not a built-in model's re-serialization.
+    # Plugin content is opaque: forward the submitted JSON, not a built-in model's re-serialization.
     body = await http_request.json()
     content = body.get("content") if isinstance(body, dict) else None
     if not isinstance(content, dict) or set(body) != {"content"}:
         raise InvalidBaseAccessRequestError("content", "must be the complete plugin content object")
-    scoped = application.records.for_scope(scope_id)
-    current = await scoped.get_artifact(family, artifact_id)
-    if expected_etag != _artifact_etag(current.revision):
-        raise ArtifactRevisionPreconditionError(expected_etag, _artifact_etag(current.revision))
-    await _require_plugin_manager(http_request).replace(
-        scope_id, family, artifact_id, content, expected_revision=current.revision
+    prefix, _, number = expected_etag.strip('"').partition(":")
+    if prefix != "revision" or not number.isdigit():
+        raise ArtifactRevisionPreconditionError(expected_etag, expected_etag)
+    expected_revision = int(number)
+    found = _plugin_family_host(http_request, family)
+    if found is None:
+        raise BaseValueNotFoundError("artifact_family", family)
+    manifest, host = found
+    await _call_plugin_host(
+        http_request,
+        host,
+        "update_artifact",
+        scope_id=scope_id,
+        payload={"artifact_id": artifact_id, "expected_revision": expected_revision, "content": content},
+        timeout=manifest.spec.change_timeout_seconds,
+        operation=REPLACE_ARTIFACT.operation_id,
     )
-    result = await scoped.get_artifact(family, artifact_id)
+    result = await application.records.for_scope(scope_id).get_artifact(family, artifact_id)
     response.headers["ETag"] = _artifact_etag(result.revision)
     return _artifact_revision_response(result)
+
+
+async def call_plugin_api(name: str, path: str, http_request: Request) -> Response:  # noqa: C901 - one route from match to response
+    """Mount every plugin route under ``/v1/plugins/{name}/api``; the host authorizes and handles it."""
+
+    from starlette.routing import compile_path
+
+    manager = _require_plugin_manager(http_request)
+    manifest = manager.loaded_manifest(name)
+    if manifest is None or manifest.spec.api is None:
+        raise BaseValueNotFoundError("plugin", name)
+    target = "/" + path
+    routes = sorted(manifest.spec.api.routes, key=lambda route: "{" in route.path)
+    for route in routes:
+        if route.method != http_request.method:
+            continue
+        pattern, _, _ = compile_path(route.path)
+        matched = pattern.match(target)
+        if matched is not None:
+            break
+    else:
+        raise BaseValueNotFoundError("plugin_route", f"{http_request.method} {target}")
+    body: Any = None
+    limit = http_request.app.state.plugin_api_max_body_bytes
+    if route.body != "none":
+        raw = await http_request.body()
+        if len(raw) > (1024 * 1024 if route.body == "json" else limit):
+            raise PluginCallError(413, "request_too_large", "The request body is too large.")
+        if route.body == "json":
+            try:
+                body = json.loads(raw or b"null")
+            except ValueError:
+                raise PluginCallError(422, "invalid_json", "The request body is not JSON.") from None
+        else:
+            body = raw
+    result = await _call_plugin_host(
+        http_request,
+        manager.host(name),
+        "api",
+        scope_id=None,
+        payload={
+            "method": route.method,
+            "route": route.path,
+            "path_params": matched.groupdict(),
+            "query": {key: http_request.query_params.getlist(key) for key in http_request.query_params},
+        },
+        body=body,
+        timeout=route.timeout_seconds,
+        operation=f"plugin:{name}:{route.handler}",
+    )
+    kind = result[0]
+    if kind == "none":
+        return Response(status_code=status.HTTP_204_NO_CONTENT)
+    if kind == "binary":
+        _, content, content_type, filename = result
+        if len(content) > limit:
+            raise PluginCallError(500, "plugin_error", "The plugin response is too large.")
+        headers = {} if filename is None else {"Content-Disposition": f'attachment; filename="{filename}"'}
+        return Response(content=content, media_type=content_type, headers=headers)
+    return JSONResponse(content=result[1])
 
 
 async def get_artifact_revision(
@@ -6098,6 +6303,8 @@ def _set_error_headers(response: Response, error: Exception) -> None:
 
 
 def _map_error(error: Exception) -> tuple[int, str, str, dict[str, Any] | None]:
+    if isinstance(error, PluginCallError):
+        return error.status, error.code, error.message, error.details
     if isinstance(error, DreamError) and error.code == "client_upgrade_required":
         return 426, error.code, "Upgrade to a client supporting Dream contract 2.", {"required_dream_contract": 2}
     if isinstance(error, ArtifactSearchFamilyNotFound):

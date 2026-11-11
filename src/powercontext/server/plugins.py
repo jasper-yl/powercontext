@@ -15,10 +15,10 @@
 """Load plugins at startup and hand their calls to the Artifact processing Supervisor.
 
 Nothing about a plugin is persisted: the directory as it is at startup decides which
-plugins exist. Plugin code runs only in check and Worker child processes. Public
-changes to plugin Artifacts run here without plugin code: edits through
-``replace_plugin_artifact``, merge, forget and restoration through the shared merge
-registry each plugin family joins at startup.
+plugins exist. Plugin code runs only in check, Worker, and host child processes. User
+changes to plugin Artifacts and the plugin's own routes go to its host process, which
+authorizes, prechecks, and writes as the caller; this process only authenticates and
+forwards.
 """
 
 from __future__ import annotations
@@ -50,8 +50,9 @@ from powercontext.builtin.plugins.families import (
     register_plugin_family,
     register_source_binding,
 )
+from powercontext.builtin.plugins.host_protocol import PluginHostSpec
 from powercontext.builtin.plugins.manifest import PluginManifest
-from powercontext.builtin.plugins.writer import plugin_merge_service, replace_plugin_artifact
+from powercontext.builtin.plugins.writer import plugin_merge_service
 from powercontext.builtin.records import BaseValueNotFoundError
 from powercontext.builtin.runtime.artifact_merge import ArtifactMergeAccess
 from powercontext.builtin.runtime.artifact_processing import (
@@ -65,6 +66,7 @@ from powercontext.builtin.runtime.processing_discovery import SourceProcessingPe
 from powercontext.builtin.sources import BUILTIN_SOURCE_REGISTRY
 from powercontext.http._generated.models import PluginPage, PluginScopePage, PluginScopeState, PluginState
 from powercontext.plugins import Cron, Interval
+from powercontext.server.plugin_hosts import PluginHost
 
 logger = logging.getLogger(__name__)
 CHECK_TIMEOUT_SECONDS = 60
@@ -79,6 +81,7 @@ class _Plugin:
     manifest: PluginManifest | None = None
     error: str | None = None
     tasks: list[asyncio.Task[None]] = field(default_factory=list)
+    host: PluginHost | None = None
 
     def state(self) -> PluginState:
         spec = None if self.manifest is None else self.manifest.spec
@@ -141,6 +144,10 @@ class PluginManager:
         *,
         register_merge: Callable[[Any], None] | None = None,
         dispatch: bool = True,
+        inference_config: Any = None,
+        storage_root: Path | None = None,
+        host_security_builder: Callable[[], dict[str, Any] | None] | None = None,
+        serve_requests: bool = True,
     ) -> None:
         self.database = database
         self.register_merge = register_merge
@@ -153,6 +160,11 @@ class PluginManager:
         self.plugins_dir = None if plugins_dir is None else plugins_dir.expanduser().resolve()
         self.plugins: dict[str, _Plugin] = {}
         self._resources = AsyncExitStack()
+        self.inference_config = inference_config
+        self.storage_root = None if storage_root is None else str(storage_root)
+        self.host_security_builder = host_security_builder or security_builder
+        # Instances that receive no requests (the background role) start no host processes.
+        self.serve_requests = serve_requests
 
     async def __aenter__(self) -> PluginManager:
         directory = self.plugins_dir
@@ -177,13 +189,59 @@ class PluginManager:
             except Exception as error:
                 plugin.error = str(error) if isinstance(error, ValueError) else type(error).__name__
                 log_safely(logger, logging.WARNING, f"Plugin {entry.name!r} failed to load")
+        if self.serve_requests:
+            self._prepare_hosts()
         return self
+
+    def _prepare_hosts(self) -> None:
+        loaded = [
+            (plugin, plugin.manifest)
+            for plugin in self.plugins.values()
+            if plugin.error is None and plugin.manifest is not None
+        ]
+        families = tuple(sorted(manifest.spec.family for _, manifest in loaded))
+        bindings = tuple(
+            (manifest.binding_name, manifest.spec.scopes, manifest.spec.inputs.source_types)
+            for _, manifest in loaded
+            if manifest.spec.inputs is not None
+        )
+        security = self.host_security_builder()
+        for plugin, manifest in loaded:
+            plugin.host = PluginHost(
+                plugin.name,
+                PluginHostSpec(
+                    database=self.config,
+                    directory=str(plugin.directory),
+                    manifest=manifest.model_dump(mode="json"),
+                    security=security,
+                    inference=self.inference_config,
+                    plugin_families=families,
+                    source_bindings=bindings,
+                    storage_root=self.storage_root,
+                ),
+            )
+            # Routes and Source Definitions serve requests from the start; plugins with only
+            # user-change methods start their host on the first change.
+            if manifest.spec.api is not None or manifest.source_manifests:
+                task = asyncio.create_task(self._start_host(plugin.host), name=f"plugin-host-start-{plugin.name}")
+                plugin.tasks.append(task)
+
+    @staticmethod
+    async def _start_host(host: PluginHost) -> None:
+        try:
+            await host.start()
+        except Exception as error:
+            log_safely(logger, logging.WARNING, f"Plugin host {host.name} did not start ({type(error).__name__})")
 
     async def __aexit__(self, *_: object) -> None:
         for plugin in self.plugins.values():
             for task in plugin.tasks:
                 task.cancel()
             await asyncio.gather(*plugin.tasks, return_exceptions=True)
+        await asyncio.gather(
+            *(plugin.host.close() for plugin in self.plugins.values() if plugin.host is not None),
+            return_exceptions=True,
+        )
         await self._resources.aclose()
 
     async def _ensure_supervisor(self) -> ArtifactProcessingSupervisors:
@@ -204,6 +262,7 @@ class PluginManager:
         if manifest is None:
             raise ValueError("plugin manifest is unavailable")  # noqa: TRY003
         generate = manifest.spec
+        await self._register_source_definitions(manifest)
         register_plugin_family(generate.family)
         if self.register_merge is not None:
             self.register_merge(
@@ -238,6 +297,8 @@ class PluginManager:
             directory=str(plugin.directory),
             manifest=manifest.model_dump(mode="json"),
             security=self.security_builder(),
+            inference=self.inference_config,
+            storage_root=self.storage_root,
         )
         supervisor = await self._ensure_supervisor()
         await supervisor.replace_binding(
@@ -264,6 +325,25 @@ class PluginManager:
             plugin.tasks.append(
                 asyncio.create_task(self._tick(manifest, generate.schedule.seconds), name=f"plugin-{plugin.name}")
             )
+
+    async def _register_source_definitions(self, manifest: PluginManifest) -> None:
+        """Register the manifests of the plugin's Source Definitions; identical manifests are reused."""
+
+        from powercontext.builtin.persistence.source_definitions import SourceDefinitionManifestRepository
+        from powercontext.errors import SourceDefinitionNotFoundError
+        from powercontext.sources.observations import SourceDefinitionManifest
+
+        repository = SourceDefinitionManifestRepository()
+        for item in manifest.source_manifests:
+            definition = SourceDefinitionManifest.model_validate(item)
+            try:
+                BUILTIN_SOURCE_REGISTRY.definition_for_name(definition.name)
+            except SourceDefinitionNotFoundError:
+                pass
+            else:
+                raise ValueError(f"Source type {definition.name} is a built-in Source type")  # noqa: TRY003
+            async with self.database.transaction() as connection:
+                await repository.register(connection, definition)
 
     async def _tick(self, manifest: PluginManifest, seconds: float) -> None:
         intents = ArtifactProcessingIntentRepository()
@@ -334,12 +414,19 @@ class PluginManager:
                 return plugin.manifest
         return None
 
-    async def replace(
-        self, scope_id: str, family: str, artifact_id: str, content: dict[str, Any], *, expected_revision: int
-    ) -> None:
-        manifest = self.plugin_for_family(family)
-        if manifest is None:
-            raise BaseValueNotFoundError("plugin_family", family)
-        await replace_plugin_artifact(
-            self.database, manifest.spec, scope_id, artifact_id, content, expected_revision=expected_revision
-        )
+    def loaded_manifest(self, name: str) -> PluginManifest | None:
+        plugin = self.plugins.get(name)
+        return None if plugin is None or plugin.error is not None else plugin.manifest
+
+    def host(self, name: str) -> PluginHost:
+        plugin = self._plugin(name)
+        if plugin.host is None:
+            raise BaseValueNotFoundError("plugin", name)
+        return plugin.host
+
+    def host_for_family(self, family: str) -> tuple[PluginManifest, PluginHost] | None:
+        for plugin in self.plugins.values():
+            manifest = plugin.manifest
+            if plugin.error is None and manifest is not None and manifest.spec.family == family:
+                return (manifest, plugin.host) if plugin.host is not None else None
+        return None

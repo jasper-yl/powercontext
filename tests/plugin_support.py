@@ -27,7 +27,7 @@ from powercontext.builtin.persistence.supervision import ArtifactProcessingLease
 from powercontext.builtin.plugins.executor import PluginWorkerSpec, execute_plugin
 from powercontext.builtin.plugins.families import plugin_artifact_repository
 from powercontext.builtin.plugins.manifest import load_plugin
-from powercontext.builtin.plugins.writer import plugin_merge_service, replace_plugin_artifact
+from powercontext.builtin.plugins.writer import PluginArtifactWriter, UserChange, plugin_merge_service
 from powercontext.builtin.runtime.artifact_merge import ArtifactMergeAccess, ArtifactMergeApplication
 from powercontext.builtin.runtime.config import SQLiteConfig
 from powercontext.builtin.runtime.processing_contracts import ArtifactProcessingWorkAssignment
@@ -71,18 +71,28 @@ async def invoke(database, directory: Path, scope_id: str):
     )
     # The executor uses the caller's open database instead of the configuration.
     spec = PluginWorkerSpec(
-        database=SQLiteConfig(), directory=str(directory), manifest=manifest.model_dump(mode="json")
+        database=SQLiteConfig(),
+        directory=str(directory),
+        manifest=manifest.model_dump(mode="json"),
+        storage_root=str(directory.parent.parent / "plugin-storage"),
     )
     return await execute_plugin(spec, assignment, database=database)
 
 
 async def edit(database, directory: Path, scope_id: str, artifact_id: str, content, *, expected_revision: int):
-    """Replace a plugin Artifact the way the Server's PUT route does."""
+    """Replace a plugin Artifact the way the host's ``update_artifact`` writer does."""
 
     manifest, _ = load_plugin(directory)
-    return await replace_plugin_artifact(
-        database, manifest.spec, scope_id, artifact_id, content, expected_revision=expected_revision
+    writer = PluginArtifactWriter(
+        database=database,
+        scope_id=scope_id,
+        family=manifest.spec.family,
+        sources=SourceRepository(BUILTIN_SOURCE_REGISTRY),
+        search_fields=manifest.spec.search_fields,
+        change=UserChange("update", artifact_id),
     )
+    async with writer.transaction() as tx:
+        return await tx.put(artifact_id, content=content, expected_revision=expected_revision)
 
 
 def governance(database, directory: Path, scope_id: str):

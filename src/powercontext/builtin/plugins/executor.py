@@ -55,6 +55,8 @@ class PluginWorkerSpec:
     directory: str
     manifest: dict[str, Any]
     security: dict[str, Any] | None = None
+    inference: Any = None
+    storage_root: str | None = None
 
 
 def run_plugin_worker(
@@ -170,12 +172,19 @@ async def execute_plugin(  # noqa: C901 - one window from selection through ackn
                 if loaded != manifest:
                     raise ValueError("the plugin changed after the Server checked it; restart the Server")  # noqa: TRY003
                 async with AsyncExitStack() as plugin_resources:
+                    from powercontext.builtin.plugins.storage import open_plugin_resources
+
+                    storage, models = await open_plugin_resources(
+                        spec.database, spec.storage_root, manifest.name, spec.inference, plugin_resources
+                    )
                     context = PluginContext(
                         name=manifest.name,
                         scope_id=scope_id,
                         plugin_dir=directory,
                         logger=logging.getLogger(f"powercontext.plugin.{manifest.name}"),
                         resources=plugin_resources,
+                        storage=storage,
+                        models=models,
                     )
                     request = GenerateRequest(
                         scope_id=scope_id, reason="sources" if window else "schedule", sources=window

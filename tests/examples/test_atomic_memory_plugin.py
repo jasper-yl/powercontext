@@ -254,7 +254,8 @@ def test_model_failure_keeps_the_window_and_owned_index_failure_rolls_back(tmp_p
             database = contexts.database
             scope = await _scope(contexts)
             await contexts.records.create_source(scope, "content", "create|region|deploys go to east")
-            index = directory / "memory-index.sqlite3"
+            # The index lives in the dedicated storage core allocates for the plugin.
+            index = directory.parent.parent / "plugin-storage" / f"{directory.name}.sqlite3"
             with sqlite3.connect(index) as connection:
                 connection.execute("DROP TABLE IF EXISTS memory_vectors")
                 connection.execute("CREATE TABLE memory_vectors (scope_id TEXT)")
@@ -280,7 +281,9 @@ def test_owned_index_entries_only_nominate_current_memories(tmp_path, config, se
             await invoke(database, directory, scope)
             ((region_id, _),) = (await heads(database, scope)).items()
             # Leftovers of an attempt that never committed and of an older revision.
-            with sqlite3.connect(directory / "memory-index.sqlite3") as connection:
+            with sqlite3.connect(
+                directory.parent.parent / "plugin-storage" / f"{directory.name}.sqlite3"
+            ) as connection:
                 connection.execute(
                     "INSERT INTO memory_vectors VALUES (?, ?, ?, ?)",
                     (scope, "ghost", 1, "[" + ",".join(["0.0625"] * 256) + "]"),

@@ -205,3 +205,90 @@ def test_writer_covers_shared_lifecycle_merge_and_search(tmp_path, runtime):
                 await run(database, scope, {"op": "lifecycle", "id": "b", "state": "active"})
 
     asyncio.run(scenario())
+
+
+def _writer(database, scope: str, **options):
+    from powercontext.builtin.persistence.sources import SourceRepository
+    from powercontext.builtin.plugins.families import register_plugin_family
+    from powercontext.builtin.plugins.writer import PluginArtifactWriter
+    from powercontext.builtin.sources import BUILTIN_SOURCE_REGISTRY
+
+    register_plugin_family("notes")
+    return PluginArtifactWriter(
+        database=database, scope_id=scope, family="notes", sources=SourceRepository(BUILTIN_SOURCE_REGISTRY), **options
+    )
+
+
+def test_a_write_decided_on_a_stale_read_conflicts_instead_of_overwriting(runtime):
+    from powercontext.builtin.plugins.writer import UserChange
+    from powercontext.errors import RevisionConflictError
+
+    async def scenario():
+        async with open_builtin_contexts(runtime) as contexts:
+            database = contexts.database
+            scope = await _scope(contexts)
+            async with _writer(database, scope).transaction() as tx:
+                await tx.put("a", content={"text": "first"})
+
+            stale = _writer(database, scope)
+            assert (await stale.get("a")).ref.revision == 1
+            async with _writer(database, scope, change=UserChange("update", "a")).transaction() as tx:
+                await tx.put("a", content={"text": "user edit"}, expected_revision=1)
+
+            with pytest.raises(RevisionConflictError):
+                async with stale.transaction() as tx:
+                    await tx.put("a", content={"text": "derived from first"})
+            assert (await current(database, "notes", scope, "a")).content.content == {"text": "user edit"}
+
+    asyncio.run(scenario())
+
+
+def test_user_changes_complete_exactly_their_write_and_always_record_a_revision(runtime):
+    from powercontext.builtin.plugins.writer import PluginContractError, UserChange
+
+    async def scenario():
+        async with open_builtin_contexts(runtime) as contexts:
+            database = contexts.database
+            scope = await _scope(contexts)
+            async with _writer(database, scope).transaction() as tx:
+                await tx.put("a", content={"text": "same"})
+                await tx.put("b", content={"text": "other"})
+
+            with pytest.raises(PluginContractError):
+                async with _writer(database, scope, change=UserChange("update", "a")).transaction():
+                    pass
+            with pytest.raises(PluginContractError):
+                async with _writer(database, scope, change=UserChange("update", "a")).transaction() as tx:
+                    await tx.put("b", content={"text": "not the target"})
+            assert (await current(database, "notes", scope, "b")).revision == 1
+
+            # Unchanged content from a user still appends a revision bound to its lineage-only Source.
+            async with _writer(database, scope, change=UserChange("update", "a")).transaction() as tx:
+                edited = await tx.put("a", content={"text": "same"}, expected_revision=1)
+            assert edited.ref.revision == 2
+            assert [ref.source_type for ref in edited.lineage.sources] == ["content"]
+
+            # Background writes with unchanged content add nothing, as in Atomic Memory.
+            async with _writer(database, scope).transaction() as tx:
+                kept = await tx.put("a", content={"text": "same"})
+            assert kept.ref.revision == 2
+
+    asyncio.run(scenario())
+
+
+def test_lifecycle_changes_report_the_target_and_its_group(runtime):
+    async def scenario():
+        async with open_builtin_contexts(runtime) as contexts:
+            database = contexts.database
+            scope = await _scope(contexts)
+            async with _writer(database, scope).transaction() as tx:
+                await tx.put("a", content={"text": "a"})
+                await tx.put("b", content={"text": "b"})
+                await tx.merge(("a", "b"), into="ab", content={"text": "a and b"})
+            async with _writer(database, scope).transaction() as tx:
+                restored = await tx.set_lifecycle("a", "active")
+            assert restored.artifact.lifecycle_state == "active"
+            assert {ref.artifact_id for ref in restored.restored} == {"b"}
+            assert {ref.artifact_id for ref in restored.retired} == {"ab"}
+
+    asyncio.run(scenario())
