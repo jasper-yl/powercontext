@@ -240,6 +240,22 @@ back and deletes both files when the response ends or the request fails.
 exported; `application/octet-stream` for `binary` bodies; shared 401, 403, 404, 413, 422, 500, 503, and 504 error
 responses; and the extension `x-powercontext-access` recording `access` and `scope_param`.
 
+### 5.5 MCP tools
+
+- The existing `create_mcp_server` generates tools from Server's OpenAPI document at startup and calls HTTP routes through
+  an internal bridge (`_InternalBridgeTransport`). Plugin tools reuse the same bridge: each `mcp=True` route becomes one
+  tool, and a call requests `/v1/plugins/{name}/api{path}` with the MCP session's credentials, so authentication,
+  authorization, and error handling all go through the HTTP route itself.
+- Input schema: path and query parameters are string properties, and the JSON Schema of `request_model` is the `body`
+  property; the output schema is the JSON Schema of `response_model`.
+- Annotations: `GET` routes whose `access` is `scope.read` or `authenticated` get `readOnlyHint=True` and
+  `idempotentHint=True`; other routes get `readOnlyHint=False`. `openWorldHint` is always `False`.
+- Hot reload: after a switch, call FastMCP 3.4's `add_tool` / `remove_tool`, and `tools/list` always returns the current
+  tools. FastMCP can send tool-list-changed notifications only within a session's request context, while hot reload
+  happens outside requests; the implementation sends the notification on the session's next request, and where it
+  cannot, clients see the change the next time they list tools.
+- A tool name that collides with a built-in tool or another plugin's tool fails that plugin's check.
+
 ---
 
 ## 6. Handler capabilities
@@ -377,6 +393,7 @@ Metrics:
 | T7 | Plugin pages: static files, hosting page, forwarding, `_client.js` | T4 |
 | T8 | `/v1/plugins` response fields and observability | T3, T4 |
 | T9 | Browser verification: how `'self'` matches under the CSP `sandbox` directive and cookie behavior for opaque-origin requests, on Chromium, Firefox, and Safari | T7 |
+| T10 | MCP tools: generation, annotations, adding and removing on hot reload with notifications | T3, T4 |
 
 ---
 
@@ -384,6 +401,24 @@ Metrics:
 
 | Item | Notes |
 | --- | --- |
-| Exposing plugin APIs as MCP tools | The existing MCP server generates tools from Server's OpenAPI, and plugin APIs could be generated the same way. To settle: route-level opt-in (for example `mcp=True`), JSON routes only, tool names prefixed with the plugin name, and adding or removing tools with `tools/list_changed` notifications on hot reload |
 | Several instances sharing a data directory | Whether distinguishing snapshots by "created by this process" is enough, or each instance must use its own data directory |
 | Streaming large request bodies | The first version reads the whole body and exchanges it through files; whether to stream it directly to the host process |
+
+---
+
+## 12. Design decisions beyond the RFC
+
+The RFC defines only the contract. The table lists decisions this document makes to implement it that the RFC does not
+specify, to be confirmed one by one in review. Some follow D1 and D2 in RFC #2549 design §16.
+
+| # | Decision | Reason | Status |
+| --- | --- | --- | --- |
+| E1 | Version snapshots live under the data directory, named by content digest and read-only (§3) | Matches Dify unpacking each plugin package version into its own directory; read-only keeps snapshots unchanged | Adopted |
+| E2 | When several instances on one machine share a data directory, each process cleans up only snapshots it created and no longer uses (§3.4) | Avoids deleting snapshots another instance is using | To confirm: each instance could instead be required to use its own data directory |
+| E3 | Binary request and response bodies of plugin APIs are exchanged through temporary files under the data directory (§5.2) | The stdin / stdout channel does not suit large binary data | Follows D1: with a `Pipe`, bytes pass directly and the temporary files go away |
+| E4 | `ctx.require` and `ctx.scopes` are implemented by calling back to Server (§6) | The authentication context lives in the Server process | Follows D2: implemented locally in the host process, with no callbacks |
+| E5 | Route matching prefers paths without parameters, then declaration order (§5.1) | Matches common web frameworks and keeps parameterized paths from swallowing fixed ones | Adopted |
+| E6 | The OpenAPI `operationId` and the MCP tool name are both `<plugin name>_<handler>` (§5.4, §5.5) | Stable, predictable, and easy to cross-reference | Adopted |
+| E7 | MCP tools reuse the existing internal HTTP bridge, with authorization done by the HTTP route itself (§5.5) | Consistent with built-in tools, with no second authorization path | Adopted |
+| E8 | After a plugin page navigates or reloads, the hosting page shows "Reopen the plugin page" and resumes forwarding once the iframe is rebuilt (§7.3) | After navigation the plugin page cannot be told apart from an external page | Adopted |
+| E9 | Static files use `<version digest>:<relative path>` as the ETag with `no-cache` (§7.2) | Browsers fetch new files right after a version switch | Adopted |

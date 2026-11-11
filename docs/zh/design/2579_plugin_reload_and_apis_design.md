@@ -225,6 +225,20 @@ Server 为插件分组注册一条通配路由：
 `application/octet-stream`；统一加入 401、403、404、413、422、500、503、504 的错误响应；扩展字段
 `x-powercontext-access` 记录 `access` 与 `scope_param`。
 
+### 5.5 MCP 工具
+
+- 现有的 `create_mcp_server` 在启动时从 Server 的 OpenAPI 文档生成工具，经内部桥接（`_InternalBridgeTransport`）调用
+  HTTP 路由。插件工具复用同一桥接：每个 `mcp=True` 的路由生成一个工具，调用时以 MCP 会话的认证信息请求
+  `/v1/plugins/{name}/api{path}`，认证、授权和错误处理都走 HTTP 路由本身。
+- 输入 schema：路径参数和查询参数为字符串属性，`request_model` 的 JSON Schema 作为 `body` 属性；输出 schema 为
+  `response_model` 的 JSON Schema。
+- 注解：`GET` 且 `access` 为 `scope.read` 或 `authenticated` 时 `readOnlyHint=True`、`idempotentHint=True`；其他路由
+  `readOnlyHint=False`。`openWorldHint` 均为 `False`。
+- 热加载：切换完成后调用 FastMCP 3.4 的 `add_tool` / `remove_tool`，`tools/list` 总是返回当前工具。FastMCP 的工具列表
+  变化通知只能在某个会话的请求上下文中发送，热加载发生在请求之外；实现时在会话的下一次请求中补发通知，做不到时客户端
+  在下一次列出工具时看到变化。
+- 工具名与内置工具或其他插件的工具重名时，该插件检查失败。
+
 ---
 
 ## 6. 处理函数的能力
@@ -356,6 +370,7 @@ window.onmessage(event):
 | T7 | 插件页面：静态文件、宿主页面、转发、`_client.js` | T4 |
 | T8 | `/v1/plugins` 响应字段与可观测性 | T3、T4 |
 | T9 | 浏览器验证：CSP `sandbox` 下 `'self'` 的匹配、不透明来源请求的 cookie 行为，在 Chromium、Firefox、Safari 上执行 | T7 |
+| T10 | MCP 工具：生成、注解、热加载时增删与通知 | T3、T4 |
 
 ---
 
@@ -363,6 +378,24 @@ window.onmessage(event):
 
 | 事项 | 说明 |
 | --- | --- |
-| 插件接口暴露为 MCP 工具 | 现有 MCP 由 Server 的 OpenAPI 生成工具，插件接口可以用同样方式生成。需要确定：路由级的开启方式（例如 `mcp=True`）、只开放 JSON 路由、工具名加插件名前缀、热加载时的工具增删与 `tools/list_changed` 通知 |
 | 同机多实例共用数据目录 | 快照清理按"本进程创建"区分的做法是否足够，还是要求每个实例使用独立的数据目录 |
 | 大请求体的流式传输 | 第一版完整读入后经文件交换；是否需要直接流式转交宿主进程 |
+
+---
+
+## 12. RFC 之外的设计决定
+
+RFC 只规定契约。下表列出本文为实现契约所做、RFC 没有规定的决定，评审时逐项确认。部分决定随 RFC #2549 设计 §16 的
+D1、D2 调整。
+
+| # | 决定 | 理由 | 状态 |
+| --- | --- | --- | --- |
+| E1 | 版本快照放在数据目录下，以内容摘要命名，设为只读（§3） | 与 Dify 按版本解压插件包的做法一致；只读保证快照不被修改 | 已采用 |
+| E2 | 同机多个实例共用一个数据目录时，每个进程只清理自己创建且不再使用的快照（§3.4） | 防止删除其他实例正在使用的快照 | 待确认：也可以要求每个实例使用独立的数据目录 |
+| E3 | 插件接口的二进制请求体与响应通过数据目录下的临时文件交换（§5.2） | stdin / stdout 通道不适合传大块二进制 | 随 D1 调整：改用 `Pipe` 后直接传 bytes，取消临时文件 |
+| E4 | `ctx.require` 与 `ctx.scopes` 通过回调 Server 实现（§6） | 认证上下文在 Server 进程中 | 随 D2 调整：在宿主进程中本地实现，取消回调 |
+| E5 | 路由匹配时无参数的路径优先，其次按声明顺序（§5.1） | 与常见 Web 框架一致，避免参数路径吞掉固定路径 | 已采用 |
+| E6 | OpenAPI 的 `operationId` 与 MCP 工具名都是 `<插件名>_<handler>`（§5.4、§5.5） | 稳定、可预测，便于对照 | 已采用 |
+| E7 | MCP 工具复用现有的内部 HTTP 桥接，鉴权走 HTTP 路由本身（§5.5） | 与内置工具一致，不另写一套鉴权 | 已采用 |
+| E8 | 插件页面跳转或刷新后显示"重新打开插件页面"，重建 iframe 后恢复转发（§7.3） | 页面跳转后无法区分插件页面与外部页面 | 已采用 |
+| E9 | 静态文件以 `<版本摘要>:<相对路径>` 作为 ETag 并设 `no-cache`（§7.2） | 切换版本后浏览器立即取到新文件 | 已采用 |

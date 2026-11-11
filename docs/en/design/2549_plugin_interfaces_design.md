@@ -580,3 +580,26 @@ poll / reply channel, `source load`), the old Worker plugin executor, and declar
 | Host process defaults | Concurrency, synchronous time limits, and backoff parameters need confirming under load with real plugins |
 | Permission to create the dedicated database | Whether to fall back to plugin-prefixed tables in core's database when Server's login cannot create databases |
 | Check concurrency | Whether 4 fits, to be measured in deployments with many plugins |
+
+---
+
+## 16. Design decisions beyond the RFC
+
+The RFC defines only the contract. The table lists decisions this document makes to implement it that the RFC does not
+specify, to be confirmed one by one in review. "Proposed change" means a better option exists, and the corresponding
+section will be rewritten once it is confirmed.
+
+| # | Decision | Reason | Status |
+| --- | --- | --- | --- |
+| D1 | Server and the host process exchange newline-delimited JSON over stdin / stdout (§6.2) | Matches the check child process and works across platforms | Proposed change: use `multiprocessing` spawn with a duplex `Pipe`, the same as the existing Worker launcher (`SpawnArtifactProcessingWorkerLauncher`); a plugin's `print` cannot break the channel, and bytes pass directly |
+| D2 | The host process carries only the plugin, and authorization and Scope management call back to Server (§6; RFC #2579 design §6) | The authentication context lives in the Server process | Proposed change: the host process is "core runtime + plugin", building its own database connections and authorization service from configuration like a Worker (`open_worker_security`); Server only authenticates the caller and forwards the request, and callbacks go away |
+| D3 | Version prechecks for user changes run in the Server process (§7.1) | Invalid requests never reach the host process | Follows D2: moves into the host process, and Server only authenticates and forwards |
+| D4 | When a plugin does not implement a user-change method, Server returns 422 from the declaration (§7.1) | No need to involve the host process | Adopted |
+| D5 | Plugin checks run concurrently, up to 4 (§3.1) | A check child process takes about 0.6 seconds; checking many plugins serially slows startup | Adopted; the limit is to be measured |
+| D6 | Reads outside the transaction record the earliest revision read for each Artifact, and reads of historical revisions are not recorded (§5.3) | The earliest read is where the plugin's decision starts | Adopted |
+| D7 | A Source definition manifest already registered at the center that is identical to the plugin's counts as the same definition; only different contents conflict (§8.1) | When the same Source plugin is installed on both an edge agent and the center, loading it at the center does not fail because the edge registered first | Adopted |
+| D8 | The binding ID format for collection targets, digested when too long, with an edge identity prefix in edge mode (§8.4, §8.5) | Deterministic derivation; two edge agents collecting the same external resource never overwrite each other's checkpoints | Adopted |
+| D9 | The dedicated storage engine is created per invocation in Workers and reused in host processes (§9.1) | Matches the lifetime of the factory instance | Adopted |
+| D10 | Plugin model calls are counted in usage statistics as `plugin:<name>` (§9.2) | Separates plugin model usage from built-in features | Adopted |
+| D11 | A single request timing out terminates the whole host process (§6.3) | asyncio cannot reliably interrupt one blocked request | Adopted |
+| D12 | The synchronous time limits, host process concurrency, and restart backoff in §13 | Initial values | To be confirmed under load |
