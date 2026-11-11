@@ -125,3 +125,20 @@ In the detailed results, **C = CodeGraph, S = Steering, M = Memory**. Combined l
 ## Why 40.30% and 32.57% differ
 
 40.30% covers only the solving model: 15,766,986 tokens. Adding 2,041,992 memory-generation tokens gives 17,808,978 tokens, or 32.57% below the same Gateway OFF baseline of 26,410,221. The README hero stacks both: the solving segment shows 40.30%, and the full bar, with memory generation, shows 32.57%. Both figures use the same 24 tasks and aggregate reductions, not the arithmetic mean of per-task percentage reductions.
+
+## Where the savings come from
+
+Same 24 tasks, solving only, split by input type:
+
+| Component | Gateway OFF | MCS | Change |
+| --- | ---: | ---: | ---: |
+| Cached input (re-sent context) | 25,199,744 | 14,446,080 | −10,753,664 (−42.67%) |
+| Uncached input (new content) | 991,779 | 1,131,659 | +139,880 (+14.10%) |
+| Output | 218,698 | 189,247 | −29,451 (−13.47%) |
+| Total | 26,410,221 | 15,766,986 | −10,643,235 (−40.30%) |
+
+The drop in cached input is larger than the net saving: all of the saved tokens came from re-sent context, while new content rose slightly. The 121-task results point the same way. S alone cut cached input by 36.41%; C alone raised cached input by 8.89% and uncached input by 52.09%, so supplying more retrieved content does not by itself lower usage.
+
+This also explains why the estimated cost reduction (23.51%) is smaller than the token reduction (40.30%): the saved tokens are mostly cheaper cached input, while pricier uncached input rose.
+
+This export does not include per-task model call counts, so it cannot separate fewer calls from shorter context per call; both show up as less cached input.
