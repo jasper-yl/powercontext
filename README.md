@@ -40,21 +40,19 @@ Run it as a service through HTTP, MCP, Python, or Agent integrations, or embed C
 
 **Solving alone uses 40.30% fewer tokens; including memory generation overhead, the reduction is 32.57%.** Saved memories can be reused in later sessions, extending the value of accumulated knowledge. This benchmark measures the current run; future reuse benefits have not been measured here.
 
-**Where the savings come from: re-sent context, not new input.** Every model call in an agent loop re-sends the accumulated context. In the baseline, 96% of input tokens were this re-sent context (cache hits). All of PowerContext's savings came from it: re-sent context fell by 10.75M tokens (−42.67%), while new input per call rose by 0.14M (+14.10%).
-
-**Why not compress tool output?** Tool output is only part of an agent's token usage, so even aggressive compression has a ceiling. Compression can also drop details the model needs; the model then calls the tool again to fetch the original, saving no tokens and adding a round trip. This run compressed no tool output. Instead, the agent was guided to locate code before reading it, read only the lines it needs, batch independent work, and run focused tests, cutting detours at the source.
-
 **Best task: 63.49% fewer tokens and 51.98% lower estimated model cost.** Both runs passed case 456, with tokens falling from 2.30 million to 0.84 million, including memory generation.
 
 [Explore the full benchmark: task results, methodology, and setup →](docs/benchmarks/token-savings/README.md)
 
-### Coding: put context to work
+### Coding: fewer rounds beat smaller rounds
+
+**Cutting rounds saves more than compressing them.** Every model call in an agent loop re-sends the accumulated context, so each extra round sends the whole context again. Tool output is only part of that context, so compressing it has a ceiling. Compression can also drop details the model needs, forcing another tool call to fetch the original: no tokens saved, one more round. PowerContext instead helps the agent find the right code and read the right lines from the start, avoiding detours. The benchmark is consistent with this: all of the savings came from re-sent context (−42.67%), while new input per call rose slightly.
 
 This benchmark runs in **gateway mode**, with code retrieval, working guidance, and project memory enabled together:
 
 <img src="docs/assets/readme-capabilities-en.svg" width="100%" alt="CodeGraph: relevant code with freshness checks. Steering: targeted reads, batched work and focused tests. Memory: saved decisions and bounded recall for later sessions." />
 
-**Extract memory. Reuse the cache.** In gateway mode, PowerContext supports prefix-cached memory extraction, reusing context prefixes from solving requests to lower input costs on cache hits. Keep useful memories while reducing the overhead of creating them.
+**Memory costs tokens, so make it cheap.** Saving memories takes extra model calls. That cost is real, and the 32.57% above includes it. In gateway mode, PowerContext extracts memories by reusing the context prefix of solving requests, so most of their input hits the prefix cache and is billed at the cached rate. In this benchmark, 97% of input to memory-generation calls with recorded cache fields hit the cache.
 
 ## Quick start
 
