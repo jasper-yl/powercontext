@@ -201,7 +201,9 @@ plugin = ArtifactPlugin(family="incident-report", ..., create=create)   # 或 So
 转换和保存。`resolve`、Projection 和 `identify_target` 都在插件宿主进程中执行；`collect` 在 Worker 中执行。
 
 Source 与所有内置 Source 一样只能追加，没有修改和删除；要更正内容，提交一条新的 Source。文件、图片等大块内容由插件
-存进自己的存储，Source 中只记录位置、摘要和媒体类型等元数据。
+存进自己的存储，Source 中只记录位置、摘要和媒体类型等元数据。本提案中，这类内容通过 `collect` 从外部系统读入；
+`resolve` 必须是纯函数，现有 Source 写入接口也只接受 JSON，调用方直接上传文件的入口由插件自定义接口提供，见
+[RFC #2579](https://github.com/oceanbase/powercontext/pull/2579)。
 
 ### 3.2 声明
 
@@ -316,7 +318,7 @@ powercontext source-agent --server https://memory.example.com
 
 | 接口 | 必需 | 说明 |
 | --- | --- | --- |
-| `create(ctx) -> ArtifactGenerator` | 是 | 工厂；Worker 中每次调用执行一次，宿主进程中每个 Scope 执行一次后复用 |
+| `create(ctx) -> ArtifactGenerator` | 是 | 工厂；Worker 中每次调用执行一次，宿主进程中只执行一次后复用 |
 | `generate(request, writer) -> None` | 是 | 读取 `request.sources`（未消费的 Source 窗口），在写事务块中写入 Artifact |
 | `create_artifact(request, writer) -> None` | 否 | 用户新建；`request.artifact_id` 由 core 分配 |
 | `update_artifact(request, writer) -> None` | 否 | 用户编辑指定 ID 的 Artifact，`request.expected_revision` 为调用方看到的 revision |
@@ -462,8 +464,11 @@ Source 插件的 `collect` 按 `collect.schedule` 调用；添加或恢复目标
   - `GET /v1/plugins/{name}/scopes`：每个 Scope 是否有待处理的工作、已消费到的 journal 位置和当前 journal 位置。
   - 调用失败的原因通过日志和指标排查，不在接口中保存。
 - **变更**：修改代码后重启 Server。Server 不监视文件，也不在运行中重新加载插件。采集目标是业务数据，增减不需要重启。
-- **停用**：从插件目录移走后重启。已保存的 Source、Artifact、采集目标、游标和 checkpoint 保留并可继续读取；重新部署
-  同名插件时从原位置继续。插件的专属存储不随之删除，由部署者保留或清理。
+- **停用**：从插件目录移走后重启。已保存的 Source、Artifact、采集目标、游标和 checkpoint 都保留，但该插件的 family 和
+  Source 类型不再注册：通用接口读取、检索或修改该 family 时返回 404，与不存在的 family 相同。插件 Artifact 的内容通常只
+  记录摘要或位置，正文、分块和文件在插件自己的存储中，没有插件就无法解释，因此不提供脱离插件的读取。插件 Source 类型的
+  新写入返回 422。重新部署同名插件时，读取恢复，生成从原游标继续。插件的专属存储
+  不随之删除，由部署者保留或清理。
 - **宿主进程**：由 core 按需启动、复用和重启，部署者不需要配置或管理。宿主进程的启动、终止和重启只体现在日志和指标中。
 
 # 参考级说明
@@ -498,14 +503,17 @@ class SourcePlugin(BaseModel):            # 字段见指南级说明 3.2
 - 插件名取自目录名，必须匹配 `^[a-z][a-z0-9-]{0,63}$`。
 - 声明在构造时校验，包括调度组合、`inputs` 与 `scopes` 的依赖、时限关系和 family 命名。`create` 必须是 async 函数。
 - 声明中除 `create`、`identify_target`、`definitions` 等代码对象外的部分可以序列化，Server 在检查子进程中得到它，
-  用于注册 binding 和回答运维查询；Worker 每次调用重新导入 `plugin.py`，声明与启动时不一致则调用失败，提示重启 Server。
+  用于注册 binding 和回答运维查询。
+- 检查时，core 同时计算插件目录的**代码指纹**：目录下所有文件（不含 `__pycache__`）的相对路径与内容的 SHA-256。Worker 和
+  宿主进程导入插件前重新计算，与启动时不一致则调用失败，提示重启 Server。这沿用了旧 Artifact 插件框架的做法，保证同一个
+  Server 进程中的所有调用使用同一份代码。
 
 ### 1.2 上下文
 
 ```python
 class PluginContext:
     name: str                          # 插件名
-    scope_id: str                      # 本次调用的 Scope
+    scope_id: str | None               # Worker 调用的 Scope；宿主进程中为 None，Scope 随每个请求传入
     plugin_dir: Path                   # 插件目录（只读约定）
     logger: logging.Logger             # 已绑定插件名的 logger
     storage: PluginStorage             # 插件专属存储
@@ -523,13 +531,16 @@ class PluginModels(Protocol):
     async def generate(self, messages: Sequence[ChatMessage], /, *, max_tokens: int | None = None) -> str: ...
 ```
 
-- 工厂在每次 Worker 调用中执行一次，实例不跨调用复用；在宿主进程中每个 Scope 执行一次，实例在宿主进程存续期间复用。
-  需要关闭的资源（包括插件自有存储的连接）通过 `ctx.enter_async_context` 注册，Worker 调用结束或宿主进程停止时由执行器释放。
+- 工厂在每次 Worker 调用中执行一次，实例不跨调用复用；在宿主进程中只执行一次，实例服务所有 Scope 的请求，在宿主进程
+  存续期间复用，资源占用不随 Scope 数量增长。宿主进程中的每个请求都带有 `scope_id`。需要关闭的资源（包括插件自有存储的
+  连接）通过 `ctx.enter_async_context` 注册，Worker 调用结束或宿主进程停止时由执行器释放。
 - **专属存储**：core 使用 Server 现有的数据库连接配置，在同一个后端上为插件分配一块空间，不需要额外的数据库账号：
   - SQLite：数据目录下的 `plugins/<插件名>.sqlite3`。
   - OceanBase / seekdb：名为 `powercontext_plugin_<插件名>` 的库（`-` 换成 `_`），首次使用时由 core 创建。Server 的数据库
     登录没有建库权限时，由部署者事先建好。
   - 表结构和迁移由插件自己管理，core 不读取、不迁移、不备份这块空间。它不在 core 的事务中，与核心数据的一致性按 3.5 处理。
+  - 这块空间属于整个插件，不按 Scope 隔离。插件按 `scope_id` 划分自己的数据，并在读取时自行确认数据属于本次请求的 Scope，
+    不能只凭调用方给出的 ID 返回数据。
   - 插件与 Server 使用同一个数据库登录，这一划分防止插件误写 core 的表，不防止恶意插件；插件目录本身被当作可信代码。
 - **模型**：`models` 封装 Server 的推理配置，插件拿不到模型的地址、请求头和凭据。`embedding_profile` 让插件在索引和查询时
   使用同一个 embedding 配置。调用沿用 Server 的超时设置，并计入现有的模型用量统计。插件也可以从环境变量读取自己的
@@ -666,9 +677,9 @@ class ArtifactTransaction(ArtifactReads):
 
 | 操作 | 复用的 core 实现 | 语义 |
 | --- | --- | --- |
-| `put(artifact_id, *, content, source_refs=(), artifact_refs=(), expected_revision=None)` | 公共合并方法的修改路径 | 不存在则新建 revision 1；已存在则按当前 head 追加 revision。给出 `expected_revision` 时，当前 revision 不一致即冲突，用于事务外读取、事务内写入的乐观并发。内容与当前 revision 相同时为 no-op，返回当前快照 |
-| `revert(artifact_id, *, to_revision)` | 公共恢复方法（选定 revision） | 以历史 revision 的内容追加新 revision，记录 `restored_from_revision`；目标已被遗忘或被合并冻结时一并恢复 |
-| `set_lifecycle(artifact_id, state, *, replacement_artifact_id=None)` | 公共遗忘与恢复方法；指定替代者或退役时使用 `ArtifactGovernanceRepository.transition` | `deprecated` 为遗忘，`active` 为恢复，`retired` 不可逆。恢复走共享恢复流程：记录一个内容相同的新 revision，被合并冻结的输入会撤销冻结它的合并，按组恢复。遗忘和退役不追加 revision |
+| `put(artifact_id, *, content, source_refs=(), artifact_refs=(), expected_revision=None)` | 公共合并方法的修改路径 | 不存在则新建 revision 1；已存在则按当前 head 追加 revision。给出 `expected_revision` 时，当前 revision 不一致即冲突；不给出时，使用本次调用在事务外读到的 revision（见 3.5），没有读过则不校验。内容与当前 revision 相同时不写入，返回当前快照，本次传入的 `source_refs` 和 `artifact_refs` 不会被记录（见下方写入约束）。用户修改中的 `put` 例外，见 4.1 |
+| `revert(artifact_id, *, to_revision)` | 公共恢复方法（选定 revision） | 以历史 revision 的内容追加新 revision，记录 `restored_from_revision`；目标已被遗忘或被合并冻结时一并恢复。返回 `ArtifactChange`：目标的新快照，以及一并恢复和退役的其他 Artifact 的精确引用 |
+| `set_lifecycle(artifact_id, state, *, replacement_artifact_id=None)` | 公共遗忘与恢复方法；指定替代者或退役时使用 `ArtifactGovernanceRepository.transition` | `deprecated` 为遗忘，`active` 为恢复，`retired` 不可逆。恢复走共享恢复流程：记录一个内容相同的新 revision，被合并冻结的输入会撤销冻结它的合并，按组恢复。遗忘和退役不追加 revision。返回值同 `revert`，插件据此同步更新自有索引中受级联影响的条目 |
 | `merge(inputs, *, into, content, source_refs=(), artifact_refs=())` | 公共合并方法（[RFC #1859](1859_artifact_merge.md)） | 以 `inputs` 的当前 revision 为输入，新建 `into`，记录合并关系并冻结输入。`into` 必须是新 ID；同一组输入在撤销后再次合并时，插件应把输入 revision 纳入 `stable_id`，避免与已退役的结果撞号 |
 | `preview_undo_merge(artifact_id)` / `undo_merge(artifact_id)` | 公共合并方法的预览与恢复 | 撤销产生该 Artifact 的合并，恢复输入并退役结果，返回恢复与退役的精确引用 |
 | `bind_handle(handle_key, ref)` | Artifact handle 绑定 | 把稳定 handle 绑定到指定 revision |
@@ -680,6 +691,8 @@ class ArtifactTransaction(ArtifactReads):
 - `source_refs` 在 `generate` 中只能引用本次窗口中的 Source，在用户修改中只能引用目标 Artifact 当前 lineage 中已有的
   Source（用于保留原始输入）。`artifact_refs` 可以引用本 Scope 中任意 family 实际存在的 revision；`to_revision` 和
   `bind_handle` 的目标只能是本 family 中实际存在的 revision。
+- 内容不变时不产生 revision，与内置 Atomic Memory 的处理一致：模型判断已有记忆已经表达了新 Source 的内容时，该记忆
+  不追加 revision，新 Source 也不进入它的 lineage。插件需要把新 Source 记为某个 Artifact 的证据时，应同时修改其内容。
 - 检索文本由 core 按声明的 `search_fields` 从内容中提取，插件不单独提供；同一份内容无论由插件还是用户写入，
   检索文本都相同。
 - 每个写事务块的操作数（1000）、单份内容大小（256 KiB）和总字节数（8 MiB）有上限，超出即抛出异常并回滚，
@@ -702,6 +715,11 @@ class ArtifactSnapshot(BaseModel):
     merged_into_id: str | None            # 被合并冻结时指向合并结果
     replacement_artifact_id: str | None
     governance_generation: int            # 治理状态版本，用于判断读取后是否被修改
+
+class ArtifactChange(BaseModel):          # revert / set_lifecycle 的返回值
+    artifact: ArtifactSnapshot            # 目标的新快照
+    restored: Sequence[ArtifactRef]       # 一并恢复的其他 Artifact
+    retired: Sequence[ArtifactRef]        # 一并退役的其他 Artifact
 
 class ArtifactReads(Protocol):
     async def get(self, artifact_id: str, *, revision: int | None = None) -> ArtifactSnapshot | None: ...
@@ -731,15 +749,26 @@ class ArtifactReads(Protocol):
 - **重复处理同一业务对象**：不消费 Source 的定时整理等场景会再次处理已经处理过的对象。插件用 `writer.stable_id(...)` 从业务
   身份派生 Artifact ID；`put` 在内容相同时为 no-op，`set_lifecycle` 目标状态与当前相同时为 no-op，`merge` 在输入已全部
   合并到同一结果时为 no-op，从而不会产生重复 Artifact 或无意义的 revision。
-- **插件自有存储**：插件的索引和其他存储（包括 core 分配的专属存储）不在 core 的事务中，core 不保证两者一致，由插件负责。
-  推荐做法：
+- **事务外读取后写入**：插件在事务外读到某个 Artifact，又在写事务块中对它 `put` 而没有给出 `expected_revision` 时，core
+  以事务外读到的 revision 作为期望值。读取后该 Artifact 被用户修改，写入即冲突，本次调用回滚后重新调度。这与内置
+  Atomic Memory 在提交前核对所读记忆是否变化的做法一致，用户修改不会被插件基于旧内容的写入静默覆盖。
+- **插件自有存储**：插件的索引和其他存储（core 分配的专属存储，或插件自己连接的任何数据库、对象存储、向量库）不在 core
+  的事务中。插件用自己的客户端写入并提交自有存储，core 不参与，也不保证两者一致。core 的事务是核心数据的唯一提交点：
+  自有存储中的数据只有被 core 中已提交的 revision 引用后才算生效。这不需要两阶段提交，按下面的做法即可保持一致：
   1. 在写事务块内、拿到 `ArtifactSnapshot` 之后写自有存储，按 `artifact_id` upsert。这样自有存储的写入失败会让核心写入
      一起回滚。
   2. 写事务提交失败时，自有存储可能留下本次的条目。重试会处理同一窗口、得到同一个稳定 ID，覆盖这些条目。
   3. 把自有索引当作候选来源：命中的 ID 用 `get` 读取 core 中的当前快照，以快照内容和状态为准。这样回滚留下的条目
      不会让插件读到过期内容。插件也可以定期按 core 数据重建索引。
-  4. 大块内容（正文、分块、文件字节）按 `(artifact_id, revision)` 存成不可变的记录，先写入自有存储，再在写事务块中提交
-     带摘要的 Artifact 内容。没有提交成功的记录不会被任何 revision 引用，读取时按 Artifact 内容中的摘要核对。
+  4. 大块内容（正文、分块、文件字节）按内容摘要存成不可变的记录：先写入并提交到自有存储，再在写事务块中提交内容里
+     带有该摘要的 Artifact。不能用 `(artifact_id, revision)` 作为键：写事务回滚后，同一个 revision 号会再次分配给内容
+     不同的写入。按内容摘要存储时，重试写入同样的内容得到同一个键；提交失败只会留下没有被任何 revision 引用的记录，
+     由插件按"不被引用"定期清理。
+- **对插件自有存储的要求**：上述做法与存储的种类无关，但存储需要满足三点，插件选型时自行确认，core 不做检查：
+  - 能按插件给定的键幂等写入（upsert 或"不存在才插入"）。只能由存储分配 ID 的系统，需要插件先确定 ID 再写入。
+  - 写入返回时数据已经持久化。
+  - 写入后立即可读。有刷新延迟的系统（例如 Elasticsearch 的 refresh 间隔、异步建索引的向量库）可能出现 core 已经引用、
+    自有存储中暂时读不到的情况，插件读取时需要重试或按暂时缺失处理。
 - `generate` 本身可能因失败重试而执行多次，模型调用和插件发出的外部请求不是恰好一次。
 
 ## 4. 用户对插件 Artifact 的修改
@@ -794,6 +823,8 @@ class InvalidContent(Exception):          # 插件拒绝内容；接口返回 42
 - 这些调用中的写事务只允许上表对应的那一项写操作，以及对同一 Artifact 的 `set_tags`；写其他 Artifact 时立即抛出异常。
   方法正常返回但没有完成要求的写操作，core 回滚并返回 502，表示插件没有按约定完成。
 - 插件可以规范化内容（例如补全默认字段），写入的内容以插件提交的为准。
+- `create_artifact`、`update_artifact` 中的 `put` 总是追加 revision，内容与当前 revision 相同时也一样。这与内置 family 的
+  编辑一致：每次用户编辑都有一条新的 `lineage_only` Content Source（见 4.2），需要一个新 revision 记录它。
 - 插件应在写事务块中、拿到快照之后更新自己的存储，做法同 3.5。
 
 ### 4.2 core 负责的部分
@@ -837,8 +868,8 @@ class InvalidContent(Exception):          # 插件拒绝内容；接口返回 42
   tags 接口把 family 改为字符串的处理相同。
 - 只有删除语义的需求（例如撤下一份文档）使用遗忘；core 不提供物理删除。插件可以在 `forget_artifact` 中清理自己存储中的
   正文和索引，core 中的 revision 与 Source 保留。
-- **并发**：用户修改与后台的 `generate` 可能同时发生。`generate` 在事务外读取、事务内用 `expected_revision` 写入时会发现
-  冲突并整体回滚，下一次调用基于修改后的状态重新决策；用户修改不会被插件静默覆盖。
+- **并发**：用户修改与后台的 `generate` 可能同时发生。`generate` 对事务外读过的 Artifact 写入时，core 按读到的 revision
+  校验（见 3.5），发现冲突即整体回滚，下一次调用基于修改后的状态重新决策；用户修改不会被插件基于旧内容的写入静默覆盖。
 
 ## 5. 插件执行器与消费游标
 
@@ -891,7 +922,7 @@ core 的执行模块就约需 5.5 秒、150 MB 内存。因此同步调用交给
 - **超时与故障**：每次调用受各自的时限约束（Source 写入与 `identify_target` 使用 Server 的同步调用时限，用户修改使用
   `change_timeout_seconds`）。超时、崩溃或失去响应时，core 终止该进程，进行中的请求返回 503，并在退避后重新启动；退避期间
   该插件的同步调用返回 503，后台调用不受影响。
-- **代码变更**：宿主进程在存续期间不重新导入插件。修改插件后需要重启 Server，与 Worker 的规则一致。
+- **代码变更**：宿主进程在存续期间不重新导入插件，启动时核对代码指纹。修改插件后需要重启 Server，与 Worker 的规则一致。
 - **隔离**：与 Worker 相同，宿主进程隔离普通故障，不是不可信代码的沙箱。
 
 **已激活插件的内存记录**：每个 Server 进程在内存中记录本进程加载的插件：插件名、目录、类型、声明摘要、检查结果，以及
@@ -935,10 +966,10 @@ Server 停止
 - 插件只有 `loaded` 和 `failed` 两种结果，只存在于进程内存中。Server 不持久化插件的启用状态、注册代次或配置快照；
   每次启动按当时的目录内容重新检查。插件代码只在检查子进程、宿主进程和 Worker 中导入，Server 进程不导入插件代码。
 - 没有热加载，因此不需要注册代次来屏蔽旧 Worker，现有的 Supervisor 租约 fence 已经足以屏蔽领导权变更后的旧提交。
-- Worker 每次调用重新导入插件代码并核对声明。插件目录在 Server 运行期间被修改、声明随之改变时，调用失败并提示重启；
-  只改了实现代码时，新派发的 Worker 会使用新代码。部署者应在修改后重启 Server。
-- 只读 API 角色的 Server 实例也会检查插件并注册 family 和 Source 类型，用于读取、检索、Source 写入和用户修改；它会按需
-  启动宿主进程，但不派发 Worker。
+- Worker 每次调用重新导入插件代码，导入前核对代码指纹（见 1.1）。插件目录在 Server 运行期间被修改后，新的 Worker 调用
+  和新启动的宿主进程都会失败并提示重启，不会出现同一个 Server 中新旧代码混用。部署者应在修改后重启 Server。
+- `api` 角色的 Server 实例不运行后台任务，但也会检查插件并注册 family 和 Source 类型，用于读取、检索、Source 写入和用户
+  修改；它按需启动宿主进程，不派发 Worker。`background` 角色的实例不接收请求，不启动宿主进程。
 - 运行中增减插件（热加载）和插件自定义 API 见 [RFC #2579](https://github.com/oceanbase/powercontext/pull/2579)，建立在宿主进程之上。
 
 ## 9. 执行约束
@@ -1031,7 +1062,8 @@ Server 停止
 - **写事务持锁**：写事务块期间持有数据库锁，SQLite 上会阻塞其他写入。插件若在块内执行慢操作，会拖慢整个 Server 的写入，
   直到块超时回滚。
 - **插件自有存储与核心数据不保证一致**：两者不在同一事务中，提交失败可能在自有存储中留下条目。插件需要按稳定 ID 覆盖、
-  按 revision 保存不可变记录，并以 core 的当前数据为准。
+  按内容摘要保存不可变记录、清理未被引用的记录，并以 core 的当前数据为准；自有存储还要满足幂等写入、写入即持久和
+  写后可读的要求。
 - **后台调用每次都要启动 Worker 并加载插件**：子进程启动和工厂初始化有固定开销，不适合秒级高频的后台调用；插件不能在
   Worker 调用之间复用连接或缓存。
 - **专属存储只按约定隔离**：插件与 Server 使用同一个数据库登录，技术上能访问 core 的表。
@@ -1063,6 +1095,7 @@ Server 停止
 | Source 的 `resolve` 等代码在 Server 进程中执行 | 省去进程间往返，但插件阻塞或崩溃会影响 Server；插件的同级模块以顶层名字进入 `sys.modules`，多个插件的同名模块会互相冲突，后续也无法可靠地重新加载 |
 | 常驻宿主进程处理同步调用，Worker 处理后台调用（本提案） | 同步调用不需要每次启动进程，Server 进程不导入插件代码；后台调用保留 Worker 的按次隔离和预算。代价是常驻进程的资源占用和进程管理 |
 | 插件存储进入 core 的事务（插件在 core 库中建表） | 可以原子提交，但 core 要管理插件的迁移、升级和权限，三种后端都要支持，插件数据会混入 core 的 schema。插件的存储由插件决定，不放进 core |
+| 插件存储与 core 之间用两阶段提交 | 对象存储、向量库等多数插件存储不支持 XA，core 也要为每种存储实现协调者。按内容摘要先写不可变记录、以 core 的提交为唯一生效点，就能得到需要的一致性 |
 | 一个插件声明多个 family | 可以在一个事务中写多个 family，但声明、权限和合并注册都要按多 family 设计。需要配合的场景用两个插件加跨 family 只读即可 |
 | 把 core 的环境变量或数据库配置交给插件 | core 的配置不全来自环境变量；插件拿到 core 的数据库凭据就能绕过写入器。提供封装好的 `ctx.storage` 和 `ctx.models` |
 | 端侧单独编译二进制 | 插件是带依赖的 Python 目录，冻结后的二进制无法导入插件的任意依赖，需要为每个插件和平台单独打包。同一个程序以 `source-agent` 模式启动即可 |
