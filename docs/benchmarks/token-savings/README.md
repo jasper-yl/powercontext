@@ -141,4 +141,4 @@ The drop in cached input is larger than the net saving: all of the saved tokens 
 
 This also explains why the estimated cost reduction (23.51%) is smaller than the token reduction (40.30%): the saved tokens are mostly cheaper cached input, while pricier uncached input rose.
 
-This export does not include per-task model call counts, so it cannot separate fewer calls from shorter context per call; both show up as less cached input.
+This export does not include per-task model call counts, so it cannot separate fewer calls from shorter context per call; both show up as less cached input. This run compressed no tool output and did not compare against compression-based approaches.

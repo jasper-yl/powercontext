@@ -40,7 +40,9 @@ Run it as a service through HTTP, MCP, Python, or Agent integrations, or embed C
 
 **Solving alone uses 40.30% fewer tokens; including memory generation overhead, the reduction is 32.57%.** Saved memories can be reused in later sessions, extending the value of accumulated knowledge. This benchmark measures the current run; future reuse benefits have not been measured here.
 
-**Where the savings come from: fewer detours, not smaller messages.** Every model call in an agent loop re-sends the accumulated context. In the baseline, 96% of input tokens were this re-sent context (cache hits). All of PowerContext's savings came from it: re-sent context fell by 10.75M tokens (−42.67%), while new input per call rose by 0.14M (+14.10%). The agent found the relevant code sooner, batched independent work, and ran focused tests, so less context piled up and it was re-sent less. Compressing a message trims one re-send; skipping a round trip removes the whole context from it.
+**Where the savings come from: re-sent context, not new input.** Every model call in an agent loop re-sends the accumulated context. In the baseline, 96% of input tokens were this re-sent context (cache hits). All of PowerContext's savings came from it: re-sent context fell by 10.75M tokens (−42.67%), while new input per call rose by 0.14M (+14.10%).
+
+**Why not compress tool output?** Tool output is only part of an agent's token usage, so even aggressive compression has a ceiling. Compression can also drop details the model needs; the model then calls the tool again to fetch the original, saving no tokens and adding a round trip. This run compressed no tool output. Instead, the agent was guided to locate code before reading it, read only the lines it needs, batch independent work, and run focused tests, cutting detours at the source.
 
 **Best task: 63.49% fewer tokens and 51.98% lower estimated model cost.** Both runs passed case 456, with tokens falling from 2.30 million to 0.84 million, including memory generation.
 
