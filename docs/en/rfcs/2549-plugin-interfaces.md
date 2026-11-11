@@ -566,10 +566,9 @@ class SourcePlugin(BaseModel):            # fields in guide 3.2
   `scopes`, time-limit relations, and family naming. `create` must be an async function.
 - The parts of a declaration other than code objects such as `create`, `identify_target`, and `definitions` are
   serializable. Server obtains them from the check child process to register bindings and answer operational queries.
-- During the check, core also computes the plugin directory's **code fingerprint**: the SHA-256 of the relative paths and
-  contents of every file in the directory (excluding `__pycache__`). Workers and host processes recompute it before
-  importing the plugin, and a mismatch with the startup value fails the call and asks for a Server restart. This follows
-  the old Artifact plugin framework and keeps every call in one Server process on the same code.
+- During the check, core records the plugin directory's **code fingerprint** (computed from file contents). Workers
+  and host processes check it before importing the plugin, and a mismatch fails the call and asks for a Server restart,
+  so calls in one Server process never mix old and new code.
 
 ### 1.2 Context
 
@@ -765,15 +764,15 @@ Rules:
 The write transaction covers every generic Artifact write operation. Each reuses core's existing implementation and
 validation and raises immediately when a rule is violated:
 
-| Operation | Core implementation reused | Semantics |
-| --- | --- | --- |
-| `put(artifact_id, *, content, source_refs=(), artifact_refs=(), expected_revision=None)` | The change path of the shared merge methods | Creates revision 1 if absent; otherwise appends a revision on the current head. With `expected_revision`, a different current revision is a conflict; without it, the revision this invocation read outside the transaction is used (see 3.5), and nothing is checked if it was not read. Identical content to the current revision writes nothing and returns the current snapshot, and the supplied `source_refs` and `artifact_refs` are not recorded (see the write constraints below). `put` in user changes is the exception, see 4.1 |
-| `revert(artifact_id, *, to_revision)` | The shared restoration method (selected revision) | Appends a new revision with a historical revision's content and records `restored_from_revision`; a forgotten or merge-frozen target is restored as well. Returns an `ArtifactChange`: the target's new snapshot plus exact references to the other Artifacts restored and retired with it |
-| `set_lifecycle(artifact_id, state, *, replacement_artifact_id=None)` | The shared forget and restore methods; `ArtifactGovernanceRepository.transition` for a replacement or retirement | `deprecated` forgets, `active` restores, and `retired` is irreversible. Restoring uses shared restoration: it records a new revision with the same content, and an input frozen by a merge undoes that merge as one group. Forgetting and retiring append no revision. Returns the same as `revert`, so the plugin can update entries in its own index affected by the cascade |
-| `merge(inputs, *, into, content, source_refs=(), artifact_refs=())` | The shared merge method ([RFC #1859](1859_artifact_merge.md)) | Takes the current revisions of `inputs`, creates `into`, records the merge, and freezes the inputs. `into` must be a new ID; when the same inputs are merged again after an undo, the plugin should include the input revisions in `stable_id` to avoid colliding with the retired result |
-| `preview_undo_merge(artifact_id)` / `undo_merge(artifact_id)` | Preview and restoration of the shared merge methods | Undoes the merge that produced the Artifact, restoring its inputs and retiring the result, and returns exact references to what was restored and retired |
-| `bind_handle(handle_key, ref)` | Artifact handle binding | Binds a stable handle to the given revision |
-| `set_tags(artifact_id, tags)` | Artifact tag replacement | Replaces the Artifact's tags as a whole |
+| Operation | Semantics |
+| --- | --- |
+| `put(artifact_id, *, content, source_refs=(), artifact_refs=(), expected_revision=None)` | Creates revision 1 if absent; otherwise appends a revision on the current head. With `expected_revision`, a different current revision is a conflict; without it, the revision this invocation read outside the transaction is used (see 3.5), and nothing is checked if it was not read. Identical content to the current revision writes nothing and returns the current snapshot, and the supplied `source_refs` and `artifact_refs` are not recorded (see the write constraints below). `put` in user changes is the exception, see 4.1 |
+| `revert(artifact_id, *, to_revision)` | Appends a new revision with a historical revision's content and records `restored_from_revision`; a forgotten or merge-frozen target is restored as well. Returns an `ArtifactChange`: the target's new snapshot plus exact references to the other Artifacts restored and retired with it |
+| `set_lifecycle(artifact_id, state, *, replacement_artifact_id=None)` | `deprecated` forgets, `active` restores, and `retired` is irreversible. Restoring uses shared restoration: it records a new revision with the same content, and an input frozen by a merge undoes that merge as one group. Forgetting and retiring append no revision. Returns the same as `revert`, so the plugin can update entries in its own index affected by the cascade |
+| `merge(inputs, *, into, content, source_refs=(), artifact_refs=())` | Follows the shared merge method ([RFC #1859](1859_artifact_merge.md)): takes the current revisions of `inputs`, creates `into`, records the merge, and freezes the inputs. `into` must be a new ID; when the same inputs are merged again after an undo, the plugin should include the input revisions in `stable_id` to avoid colliding with the retired result |
+| `preview_undo_merge(artifact_id)` / `undo_merge(artifact_id)` | Undoes the merge that produced the Artifact, restoring its inputs and retiring the result, and returns exact references to what was restored and retired |
+| `bind_handle(handle_key, ref)` | Binds a stable handle to the given revision |
+| `set_tags(artifact_id, tags)` | Replaces the Artifact's tags as a whole |
 
 Write constraints:
 
@@ -787,8 +786,8 @@ Write constraints:
   plugin that needs a new Source recorded as evidence for an Artifact should change its content as well.
 - Core extracts search text from the content according to the declared `search_fields`; plugins do not supply it
   separately. The same content yields the same search text whether a plugin or a user wrote it.
-- Each write transaction block has limits on operations (1000), single content size (256 KiB), and total bytes (8 MiB);
-  exceeding one raises and rolls back, with no truncation or partial commit.
+- Each write transaction block has limits on operations, single content size, and total bytes; exceeding one raises and
+  rolls back, with no truncation or partial commit.
 - Core does not validate the business structure of `content`, nor store or pin a schema. The plugin owns how its content
   structure evolves and may keep a version field in `content`.
 
@@ -959,7 +958,7 @@ class InvalidContent(Exception):          # the plugin rejects the content; the 
   `artifact_replace`, `artifact_restore`, or `artifact_undo_merge`) and records it in lineage as the new revision's
   direct source. Core writes these Sources, and they never enter a plugin's input window.
 - **Merge registry**: the generic merge, forget, and restoration APIs sit on the registry of the shared merge engine
-  (`ArtifactMergeApplication`, [RFC #1859](1859_artifact_merge.md)) and work for every registered family. Experience and
+  ([RFC #1859](1859_artifact_merge.md)) and work for every registered family. Experience and
   Atomic Memory are the registered built-in families and use their own adapters; a plugin family is registered at load
   and handed to the matching plugin method. Unregistered families return 422.
 - **No preview**: Atomic Memory's dedicated APIs can preview a restoration's effect and then execute it with a signed
@@ -999,48 +998,32 @@ class InvalidContent(Exception):          # the plugin rejects the content; the 
   invocation back, and the next invocation decides again from the changed state, so a user change is never silently
   overwritten by a plugin write based on old content.
 
-## 5. Plugin executor and consumption cursor
+## 5. Consumption cursor
 
-The plugin executor is core code in the Worker that implements the Supervisor's Worker entry point, replacing the old
-`run_artifact_plugin_worker`. One Artifact plugin invocation looks like this:
+Each background call of an Artifact plugin processes one Source window after the cursor in that Scope:
 
-```text
-Worker receives (plugin:<name>, scope_id, request_generation)
-  -> short transaction: ScopeInvocation.start; read the cursor for (scope_id, plugin:<name>) in pc_source_cursors
-     -> read the journal high watermark and choose the window (after, through], through ≤ after + max_sources
-     -> list_window_for_generation reads the window, filters by inputs.source_types, computes inputs.projection
-  -> empty window with inputs declared: a short transaction does the cursor CAS and acknowledge; the plugin is not loaded
-  -> import plugin.py, compare the declaration, call create, build the writer, call generate (bounded by timeout_seconds)
-     -> reads outside the transaction: separate short read-only transactions
-     -> the write transaction block starts: open a transaction; guard (lease and invocation intent)
-        writes inside the block run in that transaction
-        the block ends: cursor CAS to through; acknowledge; commit
-  -> generate returns without opening a write transaction block: a short transaction does the cursor CAS and acknowledge
-```
-
+- The window holds at most `inputs.max_sources` Sources. When it has no matching Source, the plugin is not loaded and the
+  cursor advances with an acknowledgment.
 - Sources in the window whose type does not match are filtered out, but the cursor still advances past the whole window;
   a matching Source that lacks the required Projection fails the invocation instead of being skipped.
-- The cursor advances only in the executor's commit transaction; plugins never see its value and have no way to write it.
-  The cursor CAS ensures that even if leadership changes or the invocation is dispatched twice between reading the window
-  and committing, the same window commits only once.
-- Pending work is discovered in two ways: a Source write in the Server process marks the plugin bindings that watch the
-  Scope as pending, and at startup the existing `SourceProcessingPendingProvider` fills in Sources written by other
-  processes from the gap between the journal high watermark and the cursor. The Supervisor admits pending Scopes only when
-  a binding's interval or cron is due, so `on_sources` maps to an admission interval of about 2 seconds. These decisions
-  rest on persisted data, so pending input is not lost when Server restarts.
+- The cursor advances only by CAS in the executor's commit transaction; plugins never see its value and have no way to
+  write it. Even if leadership changes or the invocation is dispatched twice between reading the window and committing,
+  the same window commits only once.
+- Whether work is pending is decided from persisted data (the gap between the Source journal position and the cursor), so
+  pending input is not lost when Server restarts. Plugins with `on_sources` are dispatched within about 2 seconds of a new
+  Source write.
 - Without `scopes`, automatic scheduling covers every Scope whose journal is past the cursor; with `scopes`, only Scopes
   on the list are accepted.
 
-A collect invocation has the same structure: its input is the Scope's enabled targets and their checkpoints, and its
-commit is the Sources and every target's new checkpoint. Collect needs no write transaction block; the executor commits
-the return value at once. Adding a collection target requests one collection through the existing invocation intent
-(`ArtifactProcessingIntentRepository.request`).
+Collect has the same structure: its input is the Scope's enabled targets and their checkpoints, and its commit is the
+Sources and every target's new checkpoint, which the executor commits from the return value at once. Adding or restoring
+a collection target requests one collection.
 
 ## 6. Plugin host process
 
-Synchronous calls must return within the request's time limit, so they cannot start a Worker each time: a Worker starts a
-fresh Python process with `spawn`, and on a 2-core development machine importing core's execution modules alone takes
-about 5.5 seconds and 150 MB of memory. Synchronous calls therefore go to a long-lived host process:
+Synchronous calls must return within the request's time limit, so they cannot start a Worker each time: every Worker is a
+fresh Python process, and importing core's execution modules takes seconds. Synchronous calls therefore go to a
+long-lived host process:
 
 | Call | Where it runs |
 | --- | --- |
@@ -1053,16 +1036,15 @@ about 5.5 seconds and 150 MB of memory. Synchronous calls therefore go to a long
   starts it on the first synchronous call, and reuses it afterward. An Artifact plugin that provides only `generate`
   starts no host process. In edge mode, `resolve` and Projections run inside the collection Worker, and no host process
   starts.
-- **Execution**: the host process imports `plugin.py` once at startup and compares the declaration. As in a Worker, core
-  code opens the database connection, and the writer runs inside the host process. One host process can serve several
-  requests concurrently, up to a limit set in the Server configuration.
+- **Execution**: the host process imports `plugin.py` once at startup and compares the declaration, and the writer runs
+  inside the host process. One host process can serve several requests concurrently, up to a limit set in the Server
+  configuration.
 - **Timeouts and failures**: each call has its own time limit (Source writes and `identify_target` use Server's
   synchronous call limit; user changes use `change_timeout_seconds`). On a timeout, crash, or loss of response, core
   terminates the process, in-flight requests return 503, and the process restarts after a backoff. During the backoff
   the plugin's synchronous calls return 503; background calls are unaffected.
 - **Code changes**: a host process does not re-import the plugin while it lives, and checks the code fingerprint when it
-  starts. Restart Server after changing a plugin,
-  the same rule as for Workers.
+  starts. Restart Server after changing a plugin, the same rule as for Workers.
 - **Isolation**: as with Workers, the host process isolates ordinary failures and is not a sandbox for untrusted code.
 
 **In-memory record of active plugins**: each Server process records in memory the plugins it has loaded: name,
@@ -1087,29 +1069,19 @@ Core serves all public reads of plugin families without running plugin code:
   - On search, core matches that column and returns only active current revisions the caller may read in the requested
     Scope. Artifacts without searchable text do not take part.
   - The writer's `search` uses the same implementation.
-  - On SQLite, plugin families share `pc_artifact_fts` with Experience and Skill: rebuilding that helper table backfills
-    every head with search text, and the readiness check compares only built-in family rows. The implementation PR must
-    present how search works on OceanBase and validate it at scale.
+  - The implementation PR presents the search implementation on each database backend and validates it at scale.
 - Review, Recall, and Prepared Context are not open to plugin families in the first version; those APIs return an explicit
   "not supported" error, and `GET /v1/capabilities` lists plugin families.
 
 ## 8. Loading and lifecycle
 
-```text
-Server starts
-  -> scan the direct subdirectories of POWERCONTEXT_SERVER_PLUGINS_DIR (no plugins load if it is unset)
-  -> for each directory: import plugin.py in a time-limited check child process and validate the declaration, without calling create
-     -> the check child process returns a serializable declaration: Source types and the JSON Schema of their inputs,
-        the JSON Schema of target inputs, the family, and which user-change methods are implemented
-     -> Source plugins: register Source types; plugin code is not imported into the Server process
-     -> Artifact plugins: register the family for reads and search and in the merge registry; register a Supervisor
-        binding when there is a schedule or trigger
-     -> add the plugin to this process's record of active plugins
-  -> any step fails: record the error, mark the plugin failed, and continue with the next one
-Server stops
-  -> stop accepting synchronous calls, wait for in-flight calls to finish or time out, then terminate host processes
-  -> stop dispatching and reclaim Workers through the existing Supervisor shutdown
-```
+- At startup, Server checks each direct subdirectory of `POWERCONTEXT_SERVER_PLUGINS_DIR` (no plugins load if it is
+  unset): it imports `plugin.py` in a time-limited child process and validates the declaration without calling `create`.
+  Once the check passes, Server registers the Source types or family the plugin provides (reads, search, and the generic
+  merge APIs), registers a Supervisor binding when there is a schedule or trigger, and adds the plugin to this process's
+  record of active plugins. A failed check affects only that plugin.
+- When Server stops, it stops accepting synchronous calls and ends host processes first, then stops the Supervisor and
+  reclaims Workers through the existing flow.
 
 - A plugin has only two outcomes, `loaded` and `failed`, kept only in process memory. Server persists no plugin enabled
   state, registration generation, or configuration snapshot; each startup re-checks the directory as it is. Plugin code
@@ -1137,10 +1109,8 @@ Server stops
 - **Lock impact of the write transaction**: while the block is open it locks the heads and cursor rows involved; on SQLite a
   write transaction blocks all other writes to the database. The block must therefore be short, and exceeding its limit
   rolls it back.
-- **Database access**: Workers open the database without creating tables; Server prepares the schema. The existing
-  database readiness check verifies that every pending invocation intent has a persistently registered binding; bindings
-  prefixed with `plugin:` are determined by the plugin directory at startup, so the check admits them, and intents left
-  behind by a removed plugin are no longer processed.
+- **Leftover invocation intents**: after a plugin is removed, the invocation intents it left behind are no longer
+  processed and do not block the database readiness check.
 - **Failure and backoff**: a failed call commits no core data, and that plugin in that Scope enters the Supervisor's
   existing backoff without affecting other Scopes or plugins. Core never skips input automatically because of repeated
   failures; persistent failures require fixing the plugin or the data and restarting. A target that keeps failing in
@@ -1158,9 +1128,9 @@ Server stops
 | `pc_artifacts`, `pc_artifact_heads`, `pc_artifact_lineage_*`, merge records, handles, tags | Kept; Artifact plugin results |
 | `pc_source_cursors` | Kept; Artifact plugin consumption cursors, keyed by `(scope_id, plugin:<name>)` |
 | `pc_connector_checkpoints` | Kept; each collection target's checkpoint, keyed by `(scope_id, the target's binding ID)` |
-| `pc_source_collect_targets` | Added; collection targets: Scope, plugin name, target key, normalized input, enabled state, creation and update times, last successful collection time, last failure category |
+| `pc_source_collect_targets` | Added; collection targets with their normalized input, enabled state, and latest collection results |
 | Supervisor invocation intent, pending, and lease tables | Kept; plugin bindings share them with built-in bindings, and they back `GET /v1/plugins/{name}/scopes` |
-| Plugin columns added to `pc_artifact_processing_binding_states` (`plugin_id`, `plugin_family`, `binding_generation`, `desired_state`, `phase`, `last_error`) | Removed |
+| Columns the old plugin frameworks added to `pc_artifact_processing_binding_states` (desired state, management phase, registration generation, and so on) | Removed |
 | `pc_artifact_family_schemas` | Removed |
 | Search state and vector index data for custom family declarative indexes | Removed; the implementation PR confirms built-in families do not depend on them before dropping the tables |
 | Artifacts, heads, and lineage written by old Artifact plugins | Deleted, not migrated |
@@ -1170,8 +1140,7 @@ Server stops
 | Other plugin-owned indexes and storage | Not part of core; managed by the plugin and the deployer |
 | The local SQLite of edge mode | Holds only the edge's collection targets and scheduling state, no Sources; Sources and checkpoints live on the central Server |
 
-A target's binding ID is derived deterministically from the plugin name and the target key, using a digest when it exceeds
-the column width. Additions and removals ship as one new database migration whose notes list the tables, columns, and data
+Additions and removals ship as one new database migration whose notes list the tables, columns, and data
 ranges added and removed.
 
 ## 11. API changes
@@ -1197,25 +1166,15 @@ operation table are regenerated.
 ## 12. Observability
 
 Plugin calls reuse the Supervisor's and Worker's existing operation vocabulary, execution identities, and outcome fields,
-and no request ID is generated for scheduled calls. New fields:
+and no request ID is generated for scheduled calls. New fields identify the plugin name, the method called, where it ran
+(Worker or host process), the trigger, and the size of the writes; host process starts, terminations, and restarts each
+record one event.
 
-| Field | Meaning |
-| --- | --- |
-| `plugin_name` | Plugin name |
-| `plugin_method` | `collect`, `generate`, `resolve`, `identify_target`, `create_artifact`, `update_artifact`, `merge_artifacts`, `forget_artifact`, `restore_artifact` |
-| `plugin_process` | `worker` or `host` |
-| `trigger` | `schedule`, `sources`, `target_added`; `request` for synchronous calls |
-| `operation_count` | Write operations committed (Artifact) or Sources committed (collect) in this invocation |
-| `target_count` | Targets carried by this collect invocation |
-| `transaction_ms` | Time from the start of the write transaction block to commit or rollback, in milliseconds |
-
-Host process starts, terminations, and restarts each record one event with `plugin_name` and the termination reason
-(timeout, crash, Server stop). Metric labels may use `plugin_name`, `plugin_method`, and `plugin_process`, never Scope IDs
-or target keys. Logs go through `log_safely` and
-exclude Source content, Projections, Artifact content, target inputs, and environment variable values; plugin exceptions
-are logged only by type and known error category, never by message. New fields are registered in the allowlists per the
-developer guide and documented in both locales' observability docs. Call outcomes go only to logs and metrics and are not
-persisted, so the operational APIs report no "last call result".
+- Metric labels may use the plugin name, method, and execution location, never Scope IDs or target keys.
+- Logs go through `log_safely` and exclude Source content, Projections, Artifact content, target inputs, and environment
+  variable values; plugin exceptions are logged only by type and known error category, never by message.
+- New fields are registered in the allowlists per the developer guide and documented in both locales' observability docs.
+- Call outcomes go only to logs and metrics and are not persisted, so the operational APIs report no "last call result".
 
 # Drawbacks
 
@@ -1303,11 +1262,9 @@ Reasons for this choice:
   and also commits the cursor and acknowledgment.
 - **Existing PowerContext foundations**: scheduling, invocation intents, Workers, and lease fences of the
   [Artifact processing Supervisor](1515_artifact_processing_supervisor.md); the [shared merge methods](1859_artifact_merge.md);
-  the write implementations of `ArtifactRepository`, `ArtifactGovernanceRepository`, handles, and tags; the generic Artifact
-  read and write APIs; `SourceDefinition` / `SourceProjection`; the Source journal, `pc_source_cursors`, and
-  `list_window_for_generation`; `pc_connector_checkpoints`; the remote ingestion APIs (`source-observations`,
-  `connector-checkpoints`, `source-definitions/register`); the `lineage_only` Content Source built-in families record on
-  edits; and the Source management APIs with the `identify_target` target identification rule.
+  the generic Artifact read and write APIs and the `lineage_only` Content Source built-in families record on edits;
+  `SourceDefinition` / `SourceProjection`, the Source journal, and consumption cursors; connector checkpoints and the
+  remote ingestion APIs; and the Source management APIs with their target identification rule.
 
 # Unresolved questions
 
