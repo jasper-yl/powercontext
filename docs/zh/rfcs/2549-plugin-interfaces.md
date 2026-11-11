@@ -26,7 +26,7 @@ description: Source 和 Artifact 插件各自实现少量接口，由 PC Server 
   - `collect` 和 `generate` 是后台调用，在 Supervisor 管理的 Worker 子进程中执行，沿用现有的隔离、超时、并发预算、
     领导租约和失败退避。
   - Source 写入时的 `resolve` 与 Projection、添加采集目标时的 `identify_target`、用户对插件 Artifact 的修改是同步调用，
-    在 core 管理的常驻**插件宿主进程**中执行。每个 Server 进程为每个插件按需启动一个宿主进程，部署者不需要管理它。
+    在 core 管理的常驻**插件宿主进程**中执行。每个 Server 进程为每个需要同步调用的插件启动一个宿主进程，部署者不需要管理它。
 - **写入**：Artifact 插件在 `async with writer.transaction()` 块中执行写操作，块结束时 core 把写入、消费游标和
   完成确认一起提交，异常则整体回滚。插件读不到也改不了游标。
 - **core 的职责**：只管理 `pc_sources`、`pc_artifacts`（含 heads、lineage、合并记录、生命周期、handle 和 tags）及其
@@ -895,7 +895,7 @@ collect 的结构相同：输入换成该 Scope 的已启用目标及其 checkpo
 | `create_artifact`、`update_artifact`、`merge_artifacts`、`forget_artifact`、`restore_artifact` | 宿主进程 |
 | `collect`、`generate` | Supervisor Worker |
 
-- **数量与启动**：每个 Server 进程为每个需要同步调用的插件维护至多一个宿主进程，第一次有同步调用时启动，之后复用。
+- **数量与启动**：每个 Server 进程为每个需要同步调用的插件维护至多一个宿主进程，插件加载后在后台启动，之后复用。
   只提供 `generate` 的 Artifact 插件不启动宿主进程。端侧模式中，`resolve` 和 Projection 在采集 Worker 内执行，不启动宿主进程。
 - **执行**：宿主进程启动时导入一次 `plugin.py` 并核对声明，写入器在宿主进程中执行。一个宿主进程可以并发处理多个请求，
   并发上限由 Server 配置决定。

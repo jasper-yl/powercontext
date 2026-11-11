@@ -32,7 +32,7 @@ APIs exactly as they do for built-in capabilities.
     reusing its existing isolation, timeouts, concurrency budgets, leader lease, and failure backoff.
   - `resolve` and Projections during Source writes, `identify_target` when adding a collection target, and user changes
     to plugin Artifacts are synchronous calls. They run in a long-lived **plugin host process** that core manages: each
-    Server process starts one host process per plugin on demand, and deployers do not manage it.
+    Server process starts one host process for each plugin that needs synchronous calls, and deployers do not manage it.
 - **Writes**: an Artifact plugin performs its writes inside an `async with writer.transaction()` block. When the block
   ends, core commits the writes, the consumption cursor, and the completion acknowledgment together; an exception rolls
   everything back. Plugins can neither read nor change the cursor.
@@ -1033,7 +1033,7 @@ long-lived host process:
 | `collect`, `generate` | Supervisor Worker |
 
 - **Count and startup**: each Server process keeps at most one host process for each plugin that needs synchronous calls,
-  starts it on the first synchronous call, and reuses it afterward. An Artifact plugin that provides only `generate`
+  starts it in the background once the plugin loads, and reuses it afterward. An Artifact plugin that provides only `generate`
   starts no host process. In edge mode, `resolve` and Projections run inside the collection Worker, and no host process
   starts.
 - **Execution**: the host process imports `plugin.py` once at startup and compares the declaration, and the writer runs
