@@ -357,7 +357,7 @@ Content Source 的内容为调用方提交的内容（规范化前），`role="l
 ### 8.1 定义注册与写入
 
 - 启动检查得到各定义的声明式清单（Source 类型、输入 JSON Schema、Projection 键），注册到 Source 定义清单
-  （`pc_source_definition_manifests`）。与内置类型或其他插件冲突时检查失败；与端侧事先登记的清单完全相同时视为同一定义。
+  （`pc_source_definition_manifests`）。注册沿用现有的清单登记逻辑：已登记的清单与插件给出的完全相同时直接复用，内容不同才判为冲突，检查失败。
 - `POST /v1/scopes/{scope_id}/sources` 与 MCP `pc_source_add` 的 write 用法遇到插件 Source 类型时，Server 把输入交给宿主进程
   执行 `input_class` 校验、`resolve` 和 Projection（`HostRequest.method="resolve"`），拿回 Source 与 Projection 后在 Server
   进程中保存，沿用身份去重。
@@ -548,7 +548,7 @@ RFC 只规定契约。下表列出本文为实现契约所做、RFC 没有规定
 | D4 | 插件未实现某个用户修改方法时，由 Server 按声明直接返回 422（§7.1） | 不必进入宿主进程 | 已采用 |
 | D5 | 各插件的检查并发执行，上限 4（§3.1） | 检查子进程约 0.6 秒；插件多时串行检查会拖慢启动 | 已采用，上限待测量 |
 | D6 | 事务外读取记录同一 Artifact 最早读到的 revision，读取历史 revision 不记录（§5.3） | 最早一次读取是插件做决定的起点 | 已采用 |
-| D7 | 中心已登记的 Source 定义清单与插件给出的完全相同时视为同一定义，内容不同才算冲突（§8.1） | 同一个 Source 插件同时装在端侧和中心时，中心加载插件不会因端侧先登记而失败 | 已采用 |
+| D7 | 中心已登记的 Source 定义清单与插件给出的完全相同时视为同一定义，内容不同才算冲突（§8.1） | 沿用现有的清单登记逻辑（`SourceDefinitionManifestRepository.register` 对相同清单返回已有记录，内容不同才报冲突）；多个端侧登记同一定义、或同一插件同时装在端侧和中心时都依赖这一行为 | 已采用 |
 | D8 | 采集目标的 binding ID 格式，超长时取摘要；端侧加端侧标识前缀（§8.4、§8.5） | 确定性派生；两个端侧采集同一外部资源时不互相覆盖 checkpoint | 已采用 |
 | D9 | 专属存储的 engine 在 Worker 中每次调用创建，在宿主进程中复用（§9.1） | 与工厂实例的生命周期一致 | 已采用 |
 | D10 | 插件调用模型的用量统计记为 `plugin:<name>`（§9.2） | 区分插件与内置能力的模型用量 | 已采用 |

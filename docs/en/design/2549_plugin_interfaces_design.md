@@ -391,9 +391,9 @@ same way as for built-in families in `records.py`, and never enters any plugin's
 ### 8.1 Definition registration and writes
 
 - The startup check yields each definition's declarative manifest (Source type, input JSON Schema, Projection keys),
-  registered in the Source definition manifests (`pc_source_definition_manifests`). A conflict with a built-in type or
-  another plugin fails the check; a manifest identical to one registered earlier by an edge agent is treated as the same
-  definition.
+  registered in the Source definition manifests (`pc_source_definition_manifests`). Registration reuses the existing
+  manifest registration: an identical manifest already registered is reused, and only different contents conflict and
+  fail the check.
 - When `POST /v1/scopes/{scope_id}/sources` or the write use of MCP `pc_source_add` meets a plugin Source type, Server
   hands the input to the host process for `input_class` validation, `resolve`, and Projections
   (`HostRequest.method="resolve"`), then saves the returned Source and Projections in the Server process with identity
@@ -597,7 +597,7 @@ section will be rewritten once it is confirmed.
 | D4 | When a plugin does not implement a user-change method, Server returns 422 from the declaration (§7.1) | No need to involve the host process | Adopted |
 | D5 | Plugin checks run concurrently, up to 4 (§3.1) | A check child process takes about 0.6 seconds; checking many plugins serially slows startup | Adopted; the limit is to be measured |
 | D6 | Reads outside the transaction record the earliest revision read for each Artifact, and reads of historical revisions are not recorded (§5.3) | The earliest read is where the plugin's decision starts | Adopted |
-| D7 | A Source definition manifest already registered at the center that is identical to the plugin's counts as the same definition; only different contents conflict (§8.1) | When the same Source plugin is installed on both an edge agent and the center, loading it at the center does not fail because the edge registered first | Adopted |
+| D7 | A Source definition manifest already registered at the center that is identical to the plugin's counts as the same definition; only different contents conflict (§8.1) | Reuses the existing manifest registration (`SourceDefinitionManifestRepository.register` returns the existing record for an identical manifest and conflicts only on different contents); several edge agents registering the same definition, or the same plugin installed on both an edge agent and the center, rely on this | Adopted |
 | D8 | The binding ID format for collection targets, digested when too long, with an edge identity prefix in edge mode (§8.4, §8.5) | Deterministic derivation; two edge agents collecting the same external resource never overwrite each other's checkpoints | Adopted |
 | D9 | The dedicated storage engine is created per invocation in Workers and reused in host processes (§9.1) | Matches the lifetime of the factory instance | Adopted |
 | D10 | Plugin model calls are counted in usage statistics as `plugin:<name>` (§9.2) | Separates plugin model usage from built-in features | Adopted |
