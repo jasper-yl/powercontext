@@ -158,6 +158,21 @@ class DocumentPage(BaseModel):
     items: list[Document]
 
 
+class DocumentContent(BaseModel):
+    """The ``document`` Artifact content generation writes."""
+
+    knowledge_base_id: str
+    name: str
+    media_type: str
+    sha256: str
+    size: int
+    uploaded_by: str
+    embedding_profile: str
+    chunk_count: int
+    status: Literal["ready", "failed"]
+    error: str | None = None
+
+
 class SearchQuery(BaseModel):
     query: str = Field(min_length=1, max_length=2000)
     knowledge_base_ids: list[str] = Field(min_length=1, max_length=20)
@@ -300,17 +315,17 @@ class KnowledgeBasePlugin:
         while True:
             page = await reads.list(cursor=cursor, limit=200)
             for snapshot in page.items:
-                content = snapshot.content
+                content = DocumentContent.model_validate(snapshot.content)
                 documents[snapshot.ref.artifact_id] = Document(
                     id=snapshot.ref.artifact_id,
                     knowledge_base_id=record["kb_id"],
-                    name=content["name"],
-                    status=content["status"],
-                    media_type=content["media_type"],
-                    size=content["size"],
-                    chunk_count=content["chunk_count"],
+                    name=content.name,
+                    status=content.status,
+                    media_type=content.media_type,
+                    size=content.size,
+                    chunk_count=content.chunk_count,
                     revision=snapshot.ref.revision,
-                    error=content.get("error"),
+                    error=content.error,
                 )
             cursor = page.next_cursor
             if cursor is None:
@@ -328,7 +343,7 @@ class KnowledgeBasePlugin:
 
     async def _digest(self, record: dict[str, Any], identity: str) -> str | None:
         snapshot = await self.ctx.reads(record["scope_id"]).get(identity)
-        return None if snapshot is None else snapshot.content["sha256"]
+        return None if snapshot is None else DocumentContent.model_validate(snapshot.content).sha256
 
     async def list_documents(self, request: ApiRequest) -> DocumentPage:
         record = await self._knowledge_base(request.path_params["kb_id"], "scope.read")
@@ -346,13 +361,12 @@ class KnowledgeBasePlugin:
         record = await self._knowledge_base(request.path_params["kb_id"], "scope.read")
         snapshot = await self.ctx.reads(record["scope_id"]).get(request.path_params["document_id"])
         # The original is looked up within this knowledge base's Scope only.
-        original = (
-            None if snapshot is None else await self.store.original(record["scope_id"], snapshot.content["sha256"])
-        )
-        if snapshot is None or original is None:
+        document = None if snapshot is None else DocumentContent.model_validate(snapshot.content)
+        original = None if document is None else await self.store.original(record["scope_id"], document.sha256)
+        if document is None or original is None:
             raise ApiError(404, "document_not_found", "The document was not found.")
         content, media_type = original
-        return BinaryResponse(content=content, content_type=media_type, filename=snapshot.content["name"])
+        return BinaryResponse(content=content, content_type=media_type, filename=document.name)
 
     async def delete_document(self, request: ApiRequest) -> None:
         record = await self._knowledge_base(request.path_params["kb_id"], "scope.contribute")
@@ -468,7 +482,7 @@ async def create(ctx: PluginContext) -> KnowledgeBasePlugin:
     return KnowledgeBasePlugin(ctx, store)
 
 
-def _route(method: str, path: str, handler: str, **options: Any) -> Route:
+def _route(method: Literal["GET", "POST", "PATCH", "DELETE"], path: str, handler: str, **options: Any) -> Route:
     return Route(method=method, path=path, handler=handler, access="authenticated", **options)
 
 
