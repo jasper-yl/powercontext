@@ -112,7 +112,8 @@ def load_plugin(directory: Path) -> tuple[PluginManifest, ArtifactPlugin]:
 
     try:
         source_manifests = tuple(
-            manifest_for_definition(definition).model_dump(mode="json") for definition in declaration.definitions
+            manifest_for_definition(definition).model_dump(mode="json", by_alias=True)
+            for definition in declaration.definitions
         )
     except Exception as error:
         raise PluginConfigError("invalid Source Definitions") from error  # noqa: TRY003
