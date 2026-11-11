@@ -20,7 +20,7 @@ added or changed. Where this conflicts with the RFC, the RFC wins and this docum
 | --- | --- | --- |
 | C1 | One call uses one version of plugin code | Child processes import only from read-only version snapshots; a snapshot is not deleted while in use |
 | C2 | The version identity detects any content change | The version digest is computed from file contents, never from sizes and modification times |
-| C3 | Core performs plugin API authorization | The route layer checks `access` first, and each read and write capability on `ctx` checks again as the caller |
+| C3 | Core performs plugin API authorization | Core code in the host process authorizes `access` first, and each read and write capability on `ctx` checks again as the caller |
 | C4 | Plugin pages cannot borrow the user's session | Pages run in an opaque origin; the hosting page forwards only for an iframe that has not navigated, and only to routes the plugin declared |
 
 ---
@@ -33,8 +33,8 @@ added or changed. Where this conflicts with the RFC, the RFC wins and this docum
 | `src/powercontext/server/plugins.py` | Changed | `PluginManager` gains switching for additions, updates, and removals; the active plugin record gains version information |
 | `src/powercontext/server/plugin_hosts.py` | Changed | Host process replacement: switch once the new process is ready, stop the old one once drained |
 | `src/powercontext/server/plugin_api.py` | New | The plugin route group: route matching, authorization, request bodies, handing off to the host process, response mapping, OpenAPI generation |
-| `src/powercontext/builtin/plugins/host.py` | Changed | Handles `api` requests; provides `ctx.require`, `ctx.reads`, `ctx.writer`, `ctx.sources`, `ctx.scopes` |
-| `src/powercontext/builtin/plugins/host_protocol.py` | Changed | Adds `api` requests and responses and capability callback messages |
+| `src/powercontext/builtin/plugins/host.py` | Changed | Handles `api` requests: Scope authorization, `request_model` validation, calling the handler; provides `ctx.require`, `ctx.reads`, `ctx.writer`, `ctx.sources`, `ctx.scopes` locally |
+| `src/powercontext/builtin/plugins/host_protocol.py` | Changed | Adds `api` requests and responses |
 | `src/powercontext/plugins.py` | Changed | `PluginApi`, `Route`, `ApiRequest`, `BinaryResponse`, `ApiError`, `Caller`, `PluginPages` |
 | `src/powercontext/server/dashboard/plugins.py` | New | Hosting pages for plugin pages, static files, server-side forwarding, `_client.js` |
 | `src/powercontext/server/dashboard/static/plugin-host.js` | New | Hosting page script: iframe management and message forwarding |
@@ -178,8 +178,8 @@ or time out; decrement the current snapshot's reference count.
   -> once the old process exits, decrement the old snapshot's reference count
 ```
 
-When the host process has not started yet (the plugin has had no synchronous call), only the snapshot is updated, and
-the next synchronous call starts directly from the new snapshot.
+When the host process is in restart backoff and not running, only the snapshot is updated, and it starts directly from
+the new snapshot once the backoff ends.
 
 ### 4.6 Multiple instances
 
@@ -204,20 +204,26 @@ Handling:
 1. find the active plugin by `name`; return 404 if it is missing or `state != "loaded"`;
 2. match `(method, path)` against the plugin's route table, compiled from the declaration into Starlette `compile_path`
    regular expressions; paths without parameters match first, then routes in declaration order;
-3. authenticate the caller;
-4. for Scope access, take the path parameter named by `scope_param` as the Scope ID and authorize `scope.read` or
-   `scope.contribute`; `authenticated` requires only successful authentication;
-5. read the request body: at most 1 MiB for `json`, and at most `POWERCONTEXT_SERVER_PLUGIN_API_MAX_BODY_BYTES` for
+3. authenticate the caller, returning 401 when unauthenticated;
+4. read the request body: at most 1 MiB for `json`, and at most `POWERCONTEXT_SERVER_PLUGIN_API_MAX_BODY_BYTES` for
    `binary`, returning 413 beyond that;
-6. send `HostRequest(method="api", ...)` to the host process;
-7. map the response (§5.3).
+5. send `HostRequest(method="api", ...)` to the host process with the caller, route template, path parameters, query
+   parameters, and body;
+6. host process: for Scope access, take the path parameter named by `scope_param` as the Scope ID and authorize
+   `scope.read` or `scope.contribute`, returning 403 when it fails; `authenticated` needs no further check; validate
+   `request_model`; call the handler;
+7. Server maps the response (§5.3).
+
+Server does only what needs neither the plugin nor the authorization service: finding the plugin and route,
+authentication, and request size limits. Authorization and everything after it happen in the host process, matching the
+split in RFC #2549 design §6.
 
 ### 5.2 Binary request and response bodies
 
-Request and response bodies do not use the stdin / stdout JSON channel. Server writes a binary request body to
-`<data directory>/plugin-io/<request id>.in`, and `HostRequest` carries only the path; the host process writes a binary
-response to `<request id>.out` and returns its path, `content_type`, and `filename` in `HostResponse`. Server streams it
-back and deletes both files when the response ends or the request fails.
+A binary request body travels as bytes inside `HostRequest` over the `Pipe`; a `BinaryResponse` from the handler likewise
+returns as bytes inside `HostResponse`. Both are limited by `POWERCONTEXT_SERVER_PLUGIN_API_MAX_BODY_BYTES` (default
+32 MiB), and a response over the limit is treated as 500 and logged. Server and the host process each hold a copy while
+passing it, so a single request's peak memory is about twice the limit.
 
 ### 5.3 Response mapping
 
@@ -260,22 +266,20 @@ responses; and the extension `x-powercontext-access` recording `access` and `sco
 
 ## 6. Handler capabilities
 
-Handlers run in the host process, while authorization and Scope management need Server's authentication context. The
-capabilities on `ctx` are therefore implemented in two ways:
+Handlers run in the host process. A host process is "core runtime + plugin" (RFC #2549 design §6.1) and already has
+database connections, the authorization service rebuilt the Worker way (`AccessControlService`), and the Scope service, so
+every capability on `ctx` is implemented locally in the host process and authorized as the caller carried by the
+request:
 
-| Capability | Where | Implementation |
-| --- | --- | --- |
-| `ctx.require(action, scope_id)` | Callback to Server | The host process sends `CapabilityCall(kind="require")`, and Server runs the authorization check with the request's authentication context |
-| `ctx.reads(scope_id)` | Host process | First calls back to Server to check `scope.read`, then creates a read-only view in the host process, filtering reads by the caller's identity |
-| `ctx.writer(scope_id)` | Host process | Accepts only `request.scope_id` on a `scope.contribute` route; creates a writer as the caller (authorized as in RFC #2549 design §5.5), without restricting the kinds of writes |
-| `ctx.sources.submit(scope_id, definition, value)` | Host process | Same scope restriction; runs `resolve` and Projections in the host process and saves as the caller |
-| `ctx.scopes.create(...)` | Callback to Server | Server calls `ScopeApplication.create` with the external reference `{"kind": "powercontext.plugin", "value": <plugin name>}`, then `bootstrap_static_scope` so the caller becomes the administrator; authorized as `POST /v1/scopes` (`server.admin`) |
-| `ctx.scopes.update(...)` | Callback to Server | First confirms the Scope carries this plugin's external reference, then follows the implementation and authorization of `PUT /v1/scopes/{scope_id}` |
-| `ctx.scopes.list()` | Callback to Server | Lists Scopes the caller can see that carry this plugin's external reference |
-
-Callbacks share the stdin / stdout channel: the host process sends a `CapabilityCall` with a `call_id`, and Server
-replies with a `CapabilityResult`. A callback is valid only while its API request is in progress; callbacks arriving
-after the request ends are rejected.
+| Capability | Implementation |
+| --- | --- |
+| `ctx.require(action, scope_id)` | Checks with the local authorization service whether the caller has the permission |
+| `ctx.reads(scope_id)` | Checks `scope.read` first, then creates a read-only view that filters reads by the caller's identity |
+| `ctx.writer(scope_id)` | Accepts only `request.scope_id` on a `scope.contribute` route; creates a writer as the caller (authorized as in RFC #2549 design §5.5), without restricting the kinds of writes |
+| `ctx.sources.submit(scope_id, definition, value)` | Same scope restriction; runs `resolve` and Projections and saves as the caller |
+| `ctx.scopes.create(...)` | Checks that the caller has `server.admin`; calls `ScopeApplication.create` with the external reference `{"kind": "powercontext.plugin", "value": <plugin name>}`; then calls `AccessControlService.bootstrap_static_scope` so the caller becomes the administrator, the same as the `POST /v1/scopes` implementation |
+| `ctx.scopes.update(...)` | First confirms the Scope carries this plugin's external reference, then follows the implementation and authorization of `PUT /v1/scopes/{scope_id}` |
+| `ctx.scopes.list()` | Lists Scopes the caller can see that carry this plugin's external reference |
 
 ---
 
@@ -388,7 +392,7 @@ Metrics:
 | T2 | Version snapshots: creation, read-only files, reference counts, cleanup; check child processes, host processes, and Workers import from snapshots | T1, RFC #2549 design T3 |
 | T3 | Switching: addition, update, removal; registering and unregistering declaration differences; host process replacement | T2 |
 | T4 | Plugin routes: declaration, matching, authorization, request bodies, response mapping, binary file exchange | RFC #2549 design T3 |
-| T5 | Handler capabilities: callback channel, `require`, `reads`, `writer`, `sources.submit`, `scopes` | T4 |
+| T5 | Handler capabilities: `require`, `reads`, `writer`, `sources.submit`, `scopes`, implemented locally in the host process | T4 |
 | T6 | Plugin OpenAPI generation | T4 |
 | T7 | Plugin pages: static files, hosting page, forwarding, `_client.js` | T4 |
 | T8 | `/v1/plugins` response fields and observability | T3, T4 |
@@ -409,14 +413,15 @@ Metrics:
 ## 12. Design decisions beyond the RFC
 
 The RFC defines only the contract. The table lists decisions this document makes to implement it that the RFC does not
-specify, to be confirmed one by one in review. Some follow D1 and D2 in RFC #2549 design §16.
+specify, to be confirmed one by one in review. The host process model and communication are D1 and D2 in RFC #2549 design
+§16.
 
 | # | Decision | Reason | Status |
 | --- | --- | --- | --- |
 | E1 | Version snapshots live under the data directory, named by content digest and read-only (§3) | Matches Dify unpacking each plugin package version into its own directory; read-only keeps snapshots unchanged | Adopted |
 | E2 | When several instances on one machine share a data directory, each process cleans up only snapshots it created and no longer uses (§3.4) | Avoids deleting snapshots another instance is using | To confirm: each instance could instead be required to use its own data directory |
-| E3 | Binary request and response bodies of plugin APIs are exchanged through temporary files under the data directory (§5.2) | The stdin / stdout channel does not suit large binary data | Follows D1: with a `Pipe`, bytes pass directly and the temporary files go away |
-| E4 | `ctx.require` and `ctx.scopes` are implemented by calling back to Server (§6) | The authentication context lives in the Server process | Follows D2: implemented locally in the host process, with no callbacks |
+| E3 | Binary request and response bodies of plugin APIs pass directly as bytes over the `Pipe`, under the same limit (§5.2) | Follows RFC #2549 design D1; no temporary files or their cleanup. The cost is a single request's peak memory of about twice the limit | Adopted |
+| E4 | Plugin API authorization and every capability on `ctx` are implemented locally in the host process, while Server only finds the route, authenticates, and limits request size (§5.1, §6) | Follows RFC #2549 design D2; no callback channel is needed | Adopted |
 | E5 | Route matching prefers paths without parameters, then declaration order (§5.1) | Matches common web frameworks and keeps parameterized paths from swallowing fixed ones | Adopted |
 | E6 | The OpenAPI `operationId` and the MCP tool name are both `<plugin name>_<handler>` (§5.4, §5.5) | Stable, predictable, and easy to cross-reference | Adopted |
 | E7 | MCP tools reuse the existing internal HTTP bridge, with authorization done by the HTTP route itself (§5.5) | Consistent with built-in tools, with no second authorization path | Adopted |

@@ -52,9 +52,9 @@
 | `src/powercontext/builtin/plugins/manifest.py` | 修改 | 导入 `plugin.py`、校验声明、导出可序列化声明；新增代码指纹计算；支持 `SourcePlugin` |
 | `src/powercontext/builtin/plugins/executor.py` | 修改 | Worker 中的 `generate` 执行器；新增 `collect` 执行器 |
 | `src/powercontext/builtin/plugins/writer.py` | 修改 | 写入器、写事务块、读取视图；新增用户修改模式、事务外读取的 revision 记录、`ArtifactChange` |
-| `src/powercontext/builtin/plugins/host.py` | 新增 | 宿主进程入口：导入插件、调用工厂、处理请求、执行写入器 |
-| `src/powercontext/builtin/plugins/host_protocol.py` | 新增 | Server 与宿主进程之间的消息模型 |
-| `src/powercontext/server/plugin_hosts.py` | 新增 | Server 侧的宿主进程管理：按需启动、复用、超时终止、退避重启、停止 |
+| `src/powercontext/builtin/plugins/host.py` | 新增 | 宿主进程入口：重建数据库连接与权限服务、导入插件、调用工厂、鉴权与版本预检、执行插件方法与写入器 |
+| `src/powercontext/builtin/plugins/host_protocol.py` | 新增 | `PluginHostSpec` 与 Server 和宿主进程之间经 `Pipe` 传递的消息模型 |
+| `src/powercontext/server/plugin_hosts.py` | 新增 | Server 侧的宿主进程管理：插件加载后在后台启动、复用、转发请求、超时终止、退避重启、停止 |
 | `src/powercontext/builtin/plugins/storage.py` | 新增 | `PluginStorage` 实现：SQLite 文件路径与 OceanBase / seekdb 库的分配 |
 | `src/powercontext/builtin/plugins/models.py` | 新增 | `PluginModels` 实现：封装 Server 的推理配置 |
 | `src/powercontext/builtin/plugins/sources.py` | 新增 | Source 插件的定义注册、写入路径、采集目标仓库 |
@@ -235,7 +235,8 @@ window preparation")`）。
 
 - 写事务块内只允许 §7.2 表中约定的那一项写操作，以及对同一 Artifact 的 `set_tags`；其他写操作立即抛出 `PluginWriteError`。
 - 块结束时检查约定的写操作是否恰好完成一次；未完成则回滚，宿主进程返回 `contract_violation`，Server 映射为 502。
-- 写操作以调用者身份授权：写入器的 `_Security` 使用请求携带的调用者身份，而不是 Worker 的部署身份。
+- 写操作以调用者身份授权：写入器的 `_Security` 使用请求携带的调用者，而不是 Worker 的部署身份；权限服务是宿主进程中
+  重建的那一份（§6.1）。
 - 新建、编辑、恢复、撤销合并时，写入器在同一事务中写入 `lineage_only` Content Source（§7.3）。
 
 ---
@@ -244,18 +245,29 @@ window preparation")`）。
 
 ### 6.1 进程模型
 
-- 每个 Server 进程为每个需要同步调用的插件维护至多一个宿主进程，第一次同步调用时启动。需要宿主进程的插件：实现了任一
-  用户修改方法的 Artifact 插件、提供 Source 定义的 Source 插件、提供 `identify_target` 的 Source 插件。
-- 启动方式：`asyncio.create_subprocess_exec(sys.executable, "-m", "powercontext.builtin.plugins.host", ...)`，与检查子进程
-  一样以全新解释器启动，不继承 Server 进程已导入的模块。
-- 宿主进程启动时核对代码指纹，导入 `plugin.py` 并核对声明，调用一次 `create(ctx)`（`ctx.scope_id` 为 `None`），打开
-  core 数据库连接（`open_plugin_database`，不建表）与专属存储，然后发送 `ready`。
+宿主进程是 **core 运行时加插件**：它与 Worker 一样，从配置自建数据库连接、权限服务和所需的 core 服务，在此之上加载插件。
+Server 进程只负责认证调用者和转发请求，鉴权、版本预检、写入都在宿主进程中完成。
+
+- 每个 Server 进程为每个需要同步调用的插件维护至多一个宿主进程。需要宿主进程的插件：实现了任一用户修改方法的 Artifact
+  插件、提供 Source 定义的 Source 插件、提供 `identify_target` 的 Source 插件。
+- 插件加载成功后，Server 在后台启动其宿主进程，不等到第一次同步调用。宿主进程导入 core 需要数秒（Worker 实测约 5.5 秒、
+  150 MB），预先启动避免第一个请求承担这段时间；宿主进程尚未就绪时到达的请求等待就绪，等待时间计入请求时限。
+- 启动方式与 Worker 相同：`multiprocessing.get_context("spawn")` 启动子进程，复用 `SpawnArtifactProcessingWorkerLauncher`
+  中的启动、取消和回收逻辑；子进程以全新解释器启动，不继承 Server 进程已导入的模块。
+- 启动参数 `PluginHostSpec` 可以 pickle，内容与 `PluginWorkerSpec` 对应：数据库配置、推理配置、权限配置
+  （`WorkerSecuritySpec`）、插件目录、可序列化声明、代码指纹。
+- 宿主进程启动时依次：核对代码指纹；打开数据库连接（`open_plugin_database`，不建表）；用 `open_worker_security` 重建权限
+  服务；重新注册 Server 进程中只存在于内存的注册项（插件 family、权限 profile、合并注册表中的本插件 family，做法同 Worker
+  的 `_restore_access_families`）；导入 `plugin.py` 并核对声明；调用一次 `create(ctx)`（`ctx.scope_id` 为 `None`）；打开
+  专属存储；发送 `ready`。
 - 宿主进程是单个 asyncio 事件循环，可以并发处理多个请求，并发上限默认 8；超过上限的请求在 Server 侧排队，排队时间计入
   该请求的时限。
 
-### 6.2 通信协议
+### 6.2 通信
 
-Server 与宿主进程通过 stdin / stdout 交换按行分隔的 JSON 消息，stderr 只写日志。消息模型定义在 `host_protocol.py`：
+Server 与宿主进程之间是一条双向 `multiprocessing` `Pipe`，消息是可 pickle 的对象，`Pipe` 负责分帧。插件代码写到
+stdout / stderr 的内容不会进入这条通道，bytes 可以直接放在消息里，不需要另外的文件交换。消息模型定义在
+`host_protocol.py`：
 
 ```python
 class HostRequest(BaseModel):
@@ -263,40 +275,42 @@ class HostRequest(BaseModel):
     method: Literal["resolve", "identify_target", "create_artifact", "update_artifact",
                     "merge_artifacts", "forget_artifact", "restore_artifact"]
     scope_id: str
-    caller: CallerIdentity | None          # 用户修改时为调用者身份
+    caller: Principal | None               # Server 认证得到的调用者；Source 写入与用户修改时必填
+    preconditions: dict[str, JsonValue]    # 调用方提交的 If-Match、revision、state_version
     deadline_seconds: float
     payload: dict[str, JsonValue]          # 对应请求模型的 JSON
 
 class HostResponse(BaseModel):
     id: str
-    outcome: Literal["ok", "invalid_content", "not_implemented", "contract_violation", "conflict", "error"]
-    result: dict[str, JsonValue] | None = None   # 成功时的快照或 Source 引用
+    outcome: Literal["ok", "invalid_content", "not_implemented", "forbidden", "precondition_failed",
+                     "conflict", "contract_violation", "error"]
+    result: dict[str, JsonValue] | None = None   # 成功时的快照、Source 引用或 Artifact ID
     message: str | None = None                   # 仅 invalid_content 时携带插件给出的消息
     field: str | None = None
     error_type: str | None = None                # error 时只携带异常类型名
 ```
 
-二进制内容不经过这条通道；RFC #2579 的自定义接口另行定义大请求体的传递方式。
+Server 端的 `PluginHostHandle` 在一个后台任务中读取 `Pipe`，按 `id` 把响应交给等待的请求。
 
 ### 6.3 超时、故障与重启
 
 | 情况 | 处理 |
 | --- | --- |
-| 单个请求超过时限 | Server 终止整个宿主进程（`SIGTERM`，5 秒后 `SIGKILL`），进行中的全部请求返回 503 |
-| 进程退出、stdout 关闭或返回无法解析的消息 | 同上 |
-| 重启 | 退避后在下一次同步调用时启动；退避从 1 秒开始，每次翻倍，上限 60 秒；连续运行 5 分钟无故障后清零 |
+| 单个请求超过时限 | Server 终止整个宿主进程（`terminate`，5 秒后 `kill`），进行中的全部请求返回 503 |
+| 进程退出、`Pipe` 关闭或收到无法识别的消息 | 同上 |
+| 重启 | 退避后在后台重新启动；退避从 1 秒开始，每次翻倍，上限 60 秒；连续运行 5 分钟无故障后清零 |
 | 退避期间 | 该插件的同步调用直接返回 503；后台调用不受影响 |
 | Server 停止 | 停止接受同步调用，等待进行中的请求至多 10 秒，然后终止宿主进程 |
 
 同步调用的时限：Source 写入与 `identify_target` 默认 10 秒（`POWERCONTEXT_SERVER_PLUGIN_SYNC_TIMEOUT_SECONDS`），用户修改
-使用声明中的 `change_timeout_seconds`。
+使用声明中的 `change_timeout_seconds`。时限从 Server 收到请求开始计算，包括等待宿主进程就绪和排队的时间。
 
 ### 6.4 宿主进程中的写入
 
 宿主进程中的写入器与 Worker 使用同一实现，区别是：
 
 - 没有游标和调用确认；写事务块结束时只提交本次写入。
-- 授权使用请求携带的调用者身份。
+- 授权使用请求携带的调用者，由宿主进程中重建的权限服务判断，与内置 family 的授权规则相同。
 - 写事务块之外的读取同样记录 `observed`（§5.3）。
 
 ---
@@ -308,9 +322,10 @@ class HostResponse(BaseModel):
 ```text
 HTTP 请求（新建 / PUT / 合并 / 遗忘 / 恢复）
   -> Server：认证；按 family 找到插件；插件未实现对应方法 → 422（声明中记录了实现的方法，不必进入宿主进程）
-  -> Server：鉴权（与内置 family 相同）；版本预检（If-Match → 412；revision / state_version → 409）
-  -> Server：新建与合并时分配 artifact_id / into
-  -> Server：把 HostRequest 交给宿主进程，等待 HostResponse
+  -> Server：把 HostRequest（调用者、版本前置条件、请求内容）交给宿主进程，等待 HostResponse
+  -> 宿主进程：鉴权（与内置 family 相同）→ forbidden
+  -> 宿主进程：版本预检（If-Match → precondition_failed；revision / state_version → conflict），不合格时不调用插件
+  -> 宿主进程：新建与合并时分配 artifact_id / into
   -> 宿主进程：构造请求模型，调用插件方法；写入器在写事务块中完成约定的写操作，并写入 lineage_only Content Source；
      提交时再次校验版本，被其他写入改变则回滚并返回 conflict
   -> Server：按 HostResponse 映射 HTTP 响应（§7.4）
@@ -343,6 +358,8 @@ Content Source 的内容为调用方提交的内容（规范化前），`role="l
 | `HostResponse.outcome` / 情况 | HTTP |
 | --- | --- |
 | `ok` | 与内置 family 相同（新建 201，其他 200） |
+| `forbidden` | 403 |
+| `precondition_failed` | 412 |
 | `invalid_content` | 422，带插件的消息和字段 |
 | `not_implemented` | 422 |
 | `conflict` | 409 |
@@ -500,6 +517,7 @@ handle、tags；`pc_source_cursors`；`pc_connector_checkpoints`；Supervisor �
 | 用户修改时限 | 30 秒 | 声明 `change_timeout_seconds` |
 | Source 写入与 `identify_target` 时限 | 10 秒 | `POWERCONTEXT_SERVER_PLUGIN_SYNC_TIMEOUT_SECONDS` |
 | 宿主进程并发上限 | 8 | `POWERCONTEXT_SERVER_PLUGIN_HOST_CONCURRENCY` |
+| 宿主进程就绪超时 | 60 秒 | 固定 |
 | 宿主进程重启退避 | 1 秒起，翻倍，上限 60 秒 | 固定 |
 | 写事务块操作数 / 单份内容 / 总字节 | 1000 / 256 KiB / 8 MiB | 固定 |
 | `on_sources` 接纳间隔 | 2 秒 | 固定 |
@@ -512,7 +530,7 @@ handle、tags；`pc_source_cursors`；`pc_connector_checkpoints`；Supervisor �
 | --- | --- | --- |
 | T1 | 写入器：内容不变规则、事务外读取校验、`ArtifactChange`、用户修改模式 | — |
 | T2 | 代码指纹：检查子进程计算，Worker 导入前核对 | — |
-| T3 | 宿主进程：`host.py`、`host_protocol.py`、`server/plugin_hosts.py`，含超时、退避、停止 | T2 |
+| T3 | 宿主进程：`host.py`、`host_protocol.py`、`server/plugin_hosts.py`，复用 Worker 的 spawn 启动与回收，重建权限服务与内存注册项，含超时、退避、停止 | T2 |
 | T4 | 用户修改经过插件：Server 路由、版本预检、错误映射、`lineage_only` Source；替换当前的 core 直接执行 | T1、T3 |
 | T5 | 新建接口的插件分支：OpenAPI、生成代码、Server 实现 | T4 |
 | T6 | `ctx.storage`、`ctx.models` | T3 |
@@ -542,9 +560,9 @@ RFC 只规定契约。下表列出本文为实现契约所做、RFC 没有规定
 
 | # | 决定 | 理由 | 状态 |
 | --- | --- | --- | --- |
-| D1 | Server 与宿主进程之间通过 stdin / stdout 按行交换 JSON（§6.2） | 与检查子进程的做法一致，跨平台 | 建议修改：改用 `multiprocessing` 的 spawn 加双向 `Pipe`，与现有 Worker 启动器（`SpawnArtifactProcessingWorkerLauncher`）相同；插件的 `print` 不会破坏通信，bytes 可以直接传递 |
-| D2 | 宿主进程只承载插件，鉴权与 Scope 管理回调 Server（§6；RFC #2579 设计 §6） | 认证上下文在 Server 进程中 | 建议修改：宿主进程为"core 运行时 + 插件"，像 Worker 一样按配置自建数据库连接和权限服务（`open_worker_security`）；Server 只认证调用者并转发请求，取消回调 |
-| D3 | 用户修改的版本预检在 Server 进程中执行（§7.1） | 不合格的请求不进入宿主进程 | 随 D2 调整：移入宿主进程，Server 只做认证和转发 |
+| D1 | 宿主进程用 `multiprocessing` 的 spawn 启动，Server 与宿主进程之间通过双向 `Pipe` 传递可 pickle 的消息（§6.1、§6.2） | 与现有 Worker 启动器（`SpawnArtifactProcessingWorkerLauncher`）相同，启动、取消、回收可以复用；插件写 stdout 不会破坏通信；bytes 可以直接传递；跨平台。stdin / stdout 按行传 JSON 需要自己分帧，且会被插件的输出破坏 | 已采用 |
+| D2 | 宿主进程是"core 运行时 + 插件"：像 Worker 一样从配置自建数据库连接和权限服务（`open_worker_security`），重新注册内存中的注册项；Server 只认证调用者并转发请求（§6.1） | 数据库连接不能跨进程传递，Worker 已经采用这种方式；鉴权、Scope 管理和写入在同一进程中完成，不需要回调 Server。代价是每个宿主进程启动时导入整套 core，约 5.5 秒、150 MB | 已采用 |
+| D3 | 用户修改的鉴权和版本预检在宿主进程中执行，不合格时不调用插件（§7.1） | 随 D2，Server 只做认证和转发 | 已采用 |
 | D4 | 插件未实现某个用户修改方法时，由 Server 按声明直接返回 422（§7.1） | 不必进入宿主进程 | 已采用 |
 | D5 | 各插件的检查并发执行，上限 4（§3.1） | 检查子进程约 0.6 秒；插件多时串行检查会拖慢启动 | 已采用，上限待测量 |
 | D6 | 事务外读取记录同一 Artifact 最早读到的 revision，读取历史 revision 不记录（§5.3） | 最早一次读取是插件做决定的起点 | 已采用 |
@@ -554,3 +572,4 @@ RFC 只规定契约。下表列出本文为实现契约所做、RFC 没有规定
 | D10 | 插件调用模型的用量统计记为 `plugin:<name>`（§9.2） | 区分插件与内置能力的模型用量 | 已采用 |
 | D11 | 单个请求超时时终止整个宿主进程（§6.3） | asyncio 无法可靠中断一个阻塞的请求 | 已采用 |
 | D12 | §13 中的同步调用时限、宿主进程并发上限和重启退避 | 初始值 | 待压测确认 |
+| D13 | 插件加载成功后在后台预先启动宿主进程，而不是等第一次同步调用（§6.1） | 宿主进程启动需要数秒，不应由第一个请求承担；RFC #2549 参考级第 6 节相应写为插件加载后启动 | 已采用 |

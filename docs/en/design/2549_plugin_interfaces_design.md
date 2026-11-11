@@ -54,9 +54,9 @@ RFC:
 | `src/powercontext/builtin/plugins/manifest.py` | Changed | Imports `plugin.py`, validates the declaration, exports its serializable part; adds code fingerprinting; supports `SourcePlugin` |
 | `src/powercontext/builtin/plugins/executor.py` | Changed | The `generate` executor in Workers; adds the `collect` executor |
 | `src/powercontext/builtin/plugins/writer.py` | Changed | Writer, write transaction block, read views; adds user-change mode, recorded read revisions, `ArtifactChange` |
-| `src/powercontext/builtin/plugins/host.py` | New | Host process entry point: imports the plugin, runs the factory, handles requests, runs the writer |
-| `src/powercontext/builtin/plugins/host_protocol.py` | New | Message models between Server and host processes |
-| `src/powercontext/server/plugin_hosts.py` | New | Server-side host process management: start on demand, reuse, terminate on timeout, restart with backoff, stop |
+| `src/powercontext/builtin/plugins/host.py` | New | Host process entry point: rebuilds database connections and the authorization service, imports the plugin, runs the factory, authorizes and prechecks versions, runs plugin methods and the writer |
+| `src/powercontext/builtin/plugins/host_protocol.py` | New | `PluginHostSpec` and the message models passed between Server and host processes over the `Pipe` |
+| `src/powercontext/server/plugin_hosts.py` | New | Server-side host process management: start in the background once a plugin loads, reuse, forward requests, terminate on timeout, restart with backoff, stop |
 | `src/powercontext/builtin/plugins/storage.py` | New | `PluginStorage`: SQLite file paths and OceanBase / seekdb database allocation |
 | `src/powercontext/builtin/plugins/models.py` | New | `PluginModels`: wraps Server's inference configuration |
 | `src/powercontext/builtin/plugins/sources.py` | New | Source plugin definition registration, write path, and collection target repository |
@@ -262,8 +262,8 @@ The host process creates the writer for a user change with `mode=UserChange(oper
   Artifact; any other write raises `PluginWriteError` immediately.
 - When the block ends, the writer checks that the agreed operation completed exactly once; otherwise it rolls back, the
   host process returns `contract_violation`, and Server maps it to 502.
-- Writes are authorized as the caller: the writer's `_Security` uses the caller identity carried by the request, not the
-  Worker's deployment identity.
+- Writes are authorized as the caller: the writer's `_Security` uses the caller carried by the request, not the Worker's
+  deployment identity, with the authorization service rebuilt in the host process (§6.1).
 - On create, edit, restore, and undo merge, the writer writes the `lineage_only` Content Source in the same transaction
   (§7.3).
 
@@ -273,21 +273,37 @@ The host process creates the writer for a user change with `mode=UserChange(oper
 
 ### 6.1 Process model
 
-- Each Server process keeps at most one host process per plugin that needs synchronous calls, started on the first
-  synchronous call. Plugins that need one: Artifact plugins implementing any user-change method, Source plugins providing
-  Source definitions, and Source plugins providing `identify_target`.
-- Start: `asyncio.create_subprocess_exec(sys.executable, "-m", "powercontext.builtin.plugins.host", ...)`, a fresh
-  interpreter like the check child process, inheriting no modules from the Server process.
-- At startup the host process checks the code fingerprint, imports `plugin.py` and verifies the declaration, calls
-  `create(ctx)` once (`ctx.scope_id` is `None`), opens core's database connection (`open_plugin_database`, no table
-  creation) and dedicated storage, and then sends `ready`.
+A host process is **core runtime plus the plugin**: like a Worker, it builds its own database connections, authorization
+service, and the core services it needs from configuration, and loads the plugin on top. The Server process only
+authenticates the caller and forwards the request; authorization, version prechecks, and writes all happen in the host
+process.
+
+- Each Server process keeps at most one host process per plugin that needs synchronous calls. Plugins that need one:
+  Artifact plugins implementing any user-change method, Source plugins providing Source definitions, and Source plugins
+  providing `identify_target`.
+- Once a plugin loads, Server starts its host process in the background instead of waiting for the first synchronous
+  call. Importing core takes seconds (about 5.5 seconds and 150 MB as measured for Workers), so starting early keeps the
+  first request from paying for it; requests that arrive before the host process is ready wait for it, and the wait
+  counts toward the request's time limit.
+- It starts the same way as a Worker: `multiprocessing.get_context("spawn")` starts the child process, reusing the start,
+  cancellation, and reaping logic of `SpawnArtifactProcessingWorkerLauncher`; the child is a fresh interpreter that
+  inherits no modules from the Server process.
+- The startup argument `PluginHostSpec` is picklable and mirrors `PluginWorkerSpec`: database configuration, inference
+  configuration, authorization configuration (`WorkerSecuritySpec`), plugin directory, serializable declaration, and code
+  fingerprint.
+- At startup the host process, in order: checks the code fingerprint; opens the database connection
+  (`open_plugin_database`, without creating tables); rebuilds the authorization service with `open_worker_security`;
+  re-registers registrations that exist only in the Server process's memory (the plugin family, access profiles, and this
+  plugin's family in the merge registry, as Workers do with `_restore_access_families`); imports `plugin.py` and verifies
+  the declaration; calls `create(ctx)` once (`ctx.scope_id` is `None`); opens dedicated storage; and sends `ready`.
 - A host process runs one asyncio event loop and can handle several requests concurrently, with a default limit of 8;
   requests beyond the limit queue on the Server side, and queueing time counts toward the request's time limit.
 
-### 6.2 Protocol
+### 6.2 Communication
 
-Server and the host process exchange newline-delimited JSON messages over stdin / stdout; stderr carries only logs. The
-message models live in `host_protocol.py`:
+Server and the host process share one duplex `multiprocessing` `Pipe` carrying picklable objects, and the `Pipe` handles
+framing. Whatever plugin code writes to stdout / stderr never enters the channel, and bytes travel inside messages with
+no separate file exchange. The message models live in `host_protocol.py`:
 
 ```python
 class HostRequest(BaseModel):
@@ -295,40 +311,45 @@ class HostRequest(BaseModel):
     method: Literal["resolve", "identify_target", "create_artifact", "update_artifact",
                     "merge_artifacts", "forget_artifact", "restore_artifact"]
     scope_id: str
-    caller: CallerIdentity | None          # the caller identity for user changes
+    caller: Principal | None               # the caller Server authenticated; required for Source writes and user changes
+    preconditions: dict[str, JsonValue]    # If-Match, revision, and state_version the caller submitted
     deadline_seconds: float
     payload: dict[str, JsonValue]          # JSON of the corresponding request model
 
 class HostResponse(BaseModel):
     id: str
-    outcome: Literal["ok", "invalid_content", "not_implemented", "contract_violation", "conflict", "error"]
-    result: dict[str, JsonValue] | None = None   # snapshot or Source reference on success
+    outcome: Literal["ok", "invalid_content", "not_implemented", "forbidden", "precondition_failed",
+                     "conflict", "contract_violation", "error"]
+    result: dict[str, JsonValue] | None = None   # snapshot, Source reference, or Artifact ID on success
     message: str | None = None                   # the plugin's message, only for invalid_content
     field: str | None = None
     error_type: str | None = None                # only the exception type name, for error
 ```
 
-Binary content does not use this channel; RFC #2579's plugin APIs define how large request bodies are passed.
+The Server-side `PluginHostHandle` reads the `Pipe` in a background task and hands each response to the waiting request
+by `id`.
 
 ### 6.3 Timeouts, failures, and restarts
 
 | Case | Handling |
 | --- | --- |
-| A request exceeds its time limit | Server terminates the whole host process (`SIGTERM`, then `SIGKILL` after 5 seconds), and every in-flight request returns 503 |
-| The process exits, stdout closes, or an unparseable message arrives | Same as above |
-| Restart | Started on the next synchronous call after a backoff; the backoff starts at 1 second, doubles each time, caps at 60 seconds, and resets after 5 minutes without failure |
+| A request exceeds its time limit | Server terminates the whole host process (`terminate`, then `kill` after 5 seconds), and every in-flight request returns 503 |
+| The process exits, the `Pipe` closes, or an unrecognized message arrives | Same as above |
+| Restart | Restarted in the background after a backoff; the backoff starts at 1 second, doubles each time, caps at 60 seconds, and resets after 5 minutes without failure |
 | During backoff | The plugin's synchronous calls return 503 immediately; background calls are unaffected |
 | Server stop | Stop accepting synchronous calls, wait up to 10 seconds for in-flight requests, then terminate the host process |
 
 Time limits for synchronous calls: Source writes and `identify_target` default to 10 seconds
-(`POWERCONTEXT_SERVER_PLUGIN_SYNC_TIMEOUT_SECONDS`); user changes use the declaration's `change_timeout_seconds`.
+(`POWERCONTEXT_SERVER_PLUGIN_SYNC_TIMEOUT_SECONDS`); user changes use the declaration's `change_timeout_seconds`. The
+limit runs from when Server receives the request, including waiting for the host process to be ready and queueing.
 
 ### 6.4 Writes in the host process
 
 The writer in the host process shares its implementation with Workers, except:
 
 - there is no cursor or invocation acknowledgment; the write transaction block commits only this request's writes;
-- authorization uses the caller identity carried by the request;
+- authorization uses the caller carried by the request, decided by the authorization service rebuilt in the host
+  process, under the same rules as built-in families;
 - reads outside the write transaction block also record `observed` (§5.3).
 
 ---
@@ -341,9 +362,12 @@ The writer in the host process shares its implementation with Workers, except:
 HTTP request (create / PUT / merge / forget / restore)
   -> Server: authenticate; find the plugin by family; the plugin does not implement the method → 422 (the declaration
      records implemented methods, so the host process is not involved)
-  -> Server: authorize (as for built-in families); version precheck (If-Match → 412; revision / state_version → 409)
-  -> Server: allocate artifact_id / into for create and merge
-  -> Server: send a HostRequest to the host process and wait for the HostResponse
+  -> Server: send a HostRequest (caller, version preconditions, request content) to the host process and wait for the
+     HostResponse
+  -> host process: authorize (as for built-in families) → forbidden
+  -> host process: version precheck (If-Match → precondition_failed; revision / state_version → conflict); the plugin is
+     not called when it fails
+  -> host process: allocate artifact_id / into for create and merge
   -> host process: build the request model and call the plugin method; the writer completes the agreed write in the
      write transaction block and writes the lineage_only Content Source; at commit it checks versions again and rolls
      back with conflict if another write changed them
@@ -377,6 +401,8 @@ same way as for built-in families in `records.py`, and never enters any plugin's
 | `HostResponse.outcome` / case | HTTP |
 | --- | --- |
 | `ok` | Same as built-in families (201 for create, 200 otherwise) |
+| `forbidden` | 403 |
+| `precondition_failed` | 412 |
 | `invalid_content` | 422 with the plugin's message and field |
 | `not_implemented` | 422 |
 | `conflict` | 409 |
@@ -548,6 +574,7 @@ poll / reply channel, `source load`), the old Worker plugin executor, and declar
 | User change time limit | 30 seconds | Declaration `change_timeout_seconds` |
 | Source write and `identify_target` time limit | 10 seconds | `POWERCONTEXT_SERVER_PLUGIN_SYNC_TIMEOUT_SECONDS` |
 | Host process concurrency | 8 | `POWERCONTEXT_SERVER_PLUGIN_HOST_CONCURRENCY` |
+| Host process ready timeout | 60 seconds | Fixed |
 | Host process restart backoff | From 1 second, doubling, capped at 60 seconds | Fixed |
 | Operations / single content / total bytes per write block | 1000 / 256 KiB / 8 MiB | Fixed |
 | `on_sources` admission interval | 2 seconds | Fixed |
@@ -560,7 +587,7 @@ poll / reply channel, `source load`), the old Worker plugin executor, and declar
 | --- | --- | --- |
 | T1 | Writer: unchanged-content rule, read-revision checks, `ArtifactChange`, user-change mode | — |
 | T2 | Code fingerprint: computed in the check child process, verified before Worker imports | — |
-| T3 | Host processes: `host.py`, `host_protocol.py`, `server/plugin_hosts.py`, with timeouts, backoff, and stop | T2 |
+| T3 | Host processes: `host.py`, `host_protocol.py`, `server/plugin_hosts.py`, reusing the Worker's spawn start and reaping, rebuilding the authorization service and in-memory registrations, with timeouts, backoff, and stop | T2 |
 | T4 | User changes through plugins: Server routing, version prechecks, error mapping, `lineage_only` Sources; replaces core's direct execution | T1, T3 |
 | T5 | The create API's plugin branch: OpenAPI, generated code, Server implementation | T4 |
 | T6 | `ctx.storage`, `ctx.models` | T3 |
@@ -591,9 +618,9 @@ section will be rewritten once it is confirmed.
 
 | # | Decision | Reason | Status |
 | --- | --- | --- | --- |
-| D1 | Server and the host process exchange newline-delimited JSON over stdin / stdout (§6.2) | Matches the check child process and works across platforms | Proposed change: use `multiprocessing` spawn with a duplex `Pipe`, the same as the existing Worker launcher (`SpawnArtifactProcessingWorkerLauncher`); a plugin's `print` cannot break the channel, and bytes pass directly |
-| D2 | The host process carries only the plugin, and authorization and Scope management call back to Server (§6; RFC #2579 design §6) | The authentication context lives in the Server process | Proposed change: the host process is "core runtime + plugin", building its own database connections and authorization service from configuration like a Worker (`open_worker_security`); Server only authenticates the caller and forwards the request, and callbacks go away |
-| D3 | Version prechecks for user changes run in the Server process (§7.1) | Invalid requests never reach the host process | Follows D2: moves into the host process, and Server only authenticates and forwards |
+| D1 | Host processes start with `multiprocessing` spawn, and Server and host processes pass picklable messages over a duplex `Pipe` (§6.1, §6.2) | The same as the existing Worker launcher (`SpawnArtifactProcessingWorkerLauncher`), so starting, cancellation, and reaping can be reused; plugin output to stdout cannot break the channel; bytes pass directly; works across platforms. Newline-delimited JSON over stdin / stdout needs its own framing and breaks on plugin output | Adopted |
+| D2 | A host process is "core runtime + plugin": like a Worker, it builds its own database connections and authorization service from configuration (`open_worker_security`) and re-registers in-memory registrations; Server only authenticates the caller and forwards the request (§6.1) | Database connections cannot cross processes, and Workers already work this way; authorization, Scope management, and writes happen in one process with no callbacks to Server. The cost is importing all of core when each host process starts, about 5.5 seconds and 150 MB | Adopted |
+| D3 | Authorization and version prechecks for user changes run in the host process, and the plugin is not called when they fail (§7.1) | Follows D2: Server only authenticates and forwards | Adopted |
 | D4 | When a plugin does not implement a user-change method, Server returns 422 from the declaration (§7.1) | No need to involve the host process | Adopted |
 | D5 | Plugin checks run concurrently, up to 4 (§3.1) | A check child process takes about 0.6 seconds; checking many plugins serially slows startup | Adopted; the limit is to be measured |
 | D6 | Reads outside the transaction record the earliest revision read for each Artifact, and reads of historical revisions are not recorded (§5.3) | The earliest read is where the plugin's decision starts | Adopted |
@@ -603,3 +630,4 @@ section will be rewritten once it is confirmed.
 | D10 | Plugin model calls are counted in usage statistics as `plugin:<name>` (§9.2) | Separates plugin model usage from built-in features | Adopted |
 | D11 | A single request timing out terminates the whole host process (§6.3) | asyncio cannot reliably interrupt one blocked request | Adopted |
 | D12 | The synchronous time limits, host process concurrency, and restart backoff in §13 | Initial values | To be confirmed under load |
+| D13 | Host processes start in the background once the plugin loads, instead of on the first synchronous call (§6.1) | Starting a host process takes seconds, which the first request should not pay for; RFC #2549 reference section 6 says host processes start once the plugin loads | Adopted |

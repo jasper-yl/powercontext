@@ -19,7 +19,7 @@
 | --- | --- | --- |
 | C1 | 一次调用只使用一个版本的插件代码 | 子进程只从只读的版本快照导入；快照在被使用期间不删除 |
 | C2 | 版本标识能识别任何内容变化 | 版本摘要按文件内容计算，不使用大小和修改时间 |
-| C3 | 插件接口的授权由 core 完成 | 路由层先检查 `access`，`ctx` 中的每个读写能力再按调用者身份检查 |
+| C3 | 插件接口的授权由 core 完成 | 宿主进程中的 core 代码先按 `access` 授权，`ctx` 中的每个读写能力再按调用者身份检查 |
 | C4 | 插件页面借不到用户会话 | 页面运行在不透明来源；宿主页面只转发给未跳转过的 iframe，且只转发到本插件声明的路由 |
 
 ---
@@ -32,8 +32,8 @@
 | `src/powercontext/server/plugins.py` | 修改 | `PluginManager` 增加新增、更新、移除的切换逻辑；已激活插件记录增加版本信息 |
 | `src/powercontext/server/plugin_hosts.py` | 修改 | 宿主进程替换：新进程就绪后切换，旧进程排空后停止 |
 | `src/powercontext/server/plugin_api.py` | 新增 | 插件路由分组、路由匹配、授权、请求体读取、转交宿主进程、响应映射、OpenAPI 生成 |
-| `src/powercontext/builtin/plugins/host.py` | 修改 | 处理 `api` 请求；提供 `ctx.require`、`ctx.reads`、`ctx.writer`、`ctx.sources`、`ctx.scopes` |
-| `src/powercontext/builtin/plugins/host_protocol.py` | 修改 | 增加 `api` 请求与响应、能力回调消息 |
+| `src/powercontext/builtin/plugins/host.py` | 修改 | 处理 `api` 请求：Scope 授权、`request_model` 校验、调用处理函数；在本地提供 `ctx.require`、`ctx.reads`、`ctx.writer`、`ctx.sources`、`ctx.scopes` |
+| `src/powercontext/builtin/plugins/host_protocol.py` | 修改 | 增加 `api` 请求与响应 |
 | `src/powercontext/plugins.py` | 修改 | `PluginApi`、`Route`、`ApiRequest`、`BinaryResponse`、`ApiError`、`Caller`、`PluginPages` |
 | `src/powercontext/server/dashboard/plugins.py` | 新增 | 插件页面的宿主页面、静态文件、服务端转发、`_client.js` |
 | `src/powercontext/server/dashboard/static/plugin-host.js` | 新增 | 宿主页面脚本：iframe 管理与消息转发 |
@@ -166,7 +166,7 @@ Server 启动时，在第一次扫描生成当前快照之后，删除 `plugin-v
   -> 旧进程退出后，旧快照引用计数减 1
 ```
 
-宿主进程尚未启动（插件还没有过同步调用）时，只更新快照，下一次同步调用直接从新快照启动。
+宿主进程处于重启退避、当前没有运行时，只更新快照，退避结束后直接从新快照启动。
 
 ### 4.6 多实例
 
@@ -191,18 +191,21 @@ Server 为插件分组注册一条通配路由：
 1. 按 `name` 找到已激活插件，不存在或 `state != "loaded"` 返回 404；
 2. 在该插件的路由表中按 `(method, path)` 匹配。路由表由声明编译为 Starlette 的 `compile_path` 正则，匹配顺序为：没有参数的
    路径优先，其次按声明顺序；
-3. 认证调用者；
-4. `access` 为 Scope 权限时，取 `scope_param` 对应的路径参数作为 Scope ID，按 `scope.read` 或 `scope.contribute` 授权；
-   `authenticated` 只要求认证成功；
-5. 读取请求体：`json` 不超过 1 MiB，`binary` 不超过 `POWERCONTEXT_SERVER_PLUGIN_API_MAX_BODY_BYTES`，超出返回 413；
-6. 构造 `HostRequest(method="api", ...)` 交给宿主进程；
-7. 映射响应（§5.3）。
+3. 认证调用者，未认证返回 401；
+4. 读取请求体：`json` 不超过 1 MiB，`binary` 不超过 `POWERCONTEXT_SERVER_PLUGIN_API_MAX_BODY_BYTES`，超出返回 413；
+5. 构造 `HostRequest(method="api", ...)`，携带调用者、路由模板、路径参数、查询参数和请求体，交给宿主进程；
+6. 宿主进程：`access` 为 Scope 权限时，取 `scope_param` 对应的路径参数作为 Scope ID，按 `scope.read` 或
+   `scope.contribute` 授权，不满足返回 403；`authenticated` 不再检查；校验 `request_model`；调用处理函数；
+7. Server 映射响应（§5.3）。
+
+Server 只做不需要插件、也不需要权限服务的部分：找到插件和路由、认证、限制请求大小。授权和之后的步骤都在宿主进程中完成，
+与 RFC #2549 设计 §6 的分工一致。
 
 ### 5.2 二进制请求体与响应
 
-请求体和响应体不经过 stdin / stdout 的 JSON 通道。Server 把二进制请求体写入 `<数据目录>/plugin-io/<请求 id>.in`，
-`HostRequest` 只携带路径；宿主进程把二进制响应写入 `<请求 id>.out` 并在 `HostResponse` 中返回路径、`content_type` 与
-`filename`。Server 读取后以流式响应返回，响应结束或请求失败时删除两个文件。
+二进制请求体以 bytes 直接放在 `HostRequest` 中，经 `Pipe` 传给宿主进程；处理函数返回的 `BinaryResponse` 同样以 bytes
+放在 `HostResponse` 中传回。请求和响应都受 `POWERCONTEXT_SERVER_PLUGIN_API_MAX_BODY_BYTES` 限制（默认 32 MiB），超过上限
+的响应按 500 处理并记录。传递时 Server 与宿主进程各持有一份副本，单个请求的峰值内存约为上限的两倍。
 
 ### 5.3 响应映射
 
@@ -243,20 +246,18 @@ Server 为插件分组注册一条通配路由：
 
 ## 6. 处理函数的能力
 
-处理函数在宿主进程中运行，而授权和 Scope 管理需要 Server 的认证上下文。`ctx` 上的能力因此分两类实现：
+处理函数在宿主进程中运行。宿主进程是"core 运行时 + 插件"（RFC #2549 设计 §6.1），已经有数据库连接、按 Worker 方式重建的
+权限服务（`AccessControlService`）和 Scope 服务，因此 `ctx` 上的能力都在宿主进程本地实现，以请求携带的调用者授权：
 
-| 能力 | 实现位置 | 实现 |
-| --- | --- | --- |
-| `ctx.require(action, scope_id)` | 回调 Server | 宿主进程发送 `CapabilityCall(kind="require")`，Server 用请求的认证上下文执行授权检查 |
-| `ctx.reads(scope_id)` | 宿主进程 | 先回调 Server 检查 `scope.read`，再在宿主进程中创建只读视图，读取使用调用者身份过滤 |
-| `ctx.writer(scope_id)` | 宿主进程 | 只接受 `request.scope_id` 且路由为 `scope.contribute`；以调用者身份创建写入器（RFC #2549 设计 §5.5 的授权方式），不限定写操作种类 |
-| `ctx.sources.submit(scope_id, definition, value)` | 宿主进程 | 同上的范围限制；在宿主进程中执行 `resolve` 与 Projection，用调用者身份保存 |
-| `ctx.scopes.create(...)` | 回调 Server | Server 调用 `ScopeApplication.create`，加入外部引用 `{"kind": "powercontext.plugin", "value": <插件名>}`；成功后调用 `bootstrap_static_scope` 让调用者成为管理员；授权与 `POST /v1/scopes` 相同（`server.admin`） |
-| `ctx.scopes.update(...)` | 回调 Server | 先确认 Scope 带有本插件的外部引用，再走 `PUT /v1/scopes/{scope_id}` 的实现与授权 |
-| `ctx.scopes.list()` | 回调 Server | 列出调用者可见、带有本插件外部引用的 Scope |
-
-回调使用同一条 stdin / stdout 通道：宿主进程发送带 `call_id` 的 `CapabilityCall`，Server 回复 `CapabilityResult`。回调只在
-该 API 请求进行中有效，请求结束后到达的回调被拒绝。
+| 能力 | 实现 |
+| --- | --- |
+| `ctx.require(action, scope_id)` | 用本地权限服务检查调用者是否具备该权限 |
+| `ctx.reads(scope_id)` | 先检查 `scope.read`，再创建只读视图，读取按调用者身份过滤 |
+| `ctx.writer(scope_id)` | 只接受 `request.scope_id` 且路由为 `scope.contribute`；以调用者身份创建写入器（RFC #2549 设计 §5.5 的授权方式），不限定写操作种类 |
+| `ctx.sources.submit(scope_id, definition, value)` | 同上的范围限制；执行 `resolve` 与 Projection，以调用者身份保存 |
+| `ctx.scopes.create(...)` | 检查调用者具备 `server.admin`；调用 `ScopeApplication.create`，加入外部引用 `{"kind": "powercontext.plugin", "value": <插件名>}`；成功后调用 `AccessControlService.bootstrap_static_scope` 让调用者成为管理员，与 `POST /v1/scopes` 的实现相同 |
+| `ctx.scopes.update(...)` | 先确认 Scope 带有本插件的外部引用，再按 `PUT /v1/scopes/{scope_id}` 的实现与授权执行 |
+| `ctx.scopes.list()` | 列出调用者可见、带有本插件外部引用的 Scope |
 
 ---
 
@@ -365,7 +366,7 @@ window.onmessage(event):
 | T2 | 版本快照：生成、只读、引用计数、清理；检查子进程、宿主进程、Worker 改为从快照导入 | T1、RFC #2549 设计 T3 |
 | T3 | 切换：新增、更新、移除；声明差异的注册与注销；宿主进程替换 | T2 |
 | T4 | 插件路由：声明、匹配、授权、请求体、响应映射、二进制文件交换 | RFC #2549 设计 T3 |
-| T5 | 处理函数能力：回调通道、`require`、`reads`、`writer`、`sources.submit`、`scopes` | T4 |
+| T5 | 处理函数能力：`require`、`reads`、`writer`、`sources.submit`、`scopes`，在宿主进程中本地实现 | T4 |
 | T6 | 插件 OpenAPI 生成 | T4 |
 | T7 | 插件页面：静态文件、宿主页面、转发、`_client.js` | T4 |
 | T8 | `/v1/plugins` 响应字段与可观测性 | T3、T4 |
@@ -385,15 +386,15 @@ window.onmessage(event):
 
 ## 12. RFC 之外的设计决定
 
-RFC 只规定契约。下表列出本文为实现契约所做、RFC 没有规定的决定，评审时逐项确认。部分决定随 RFC #2549 设计 §16 的
-D1、D2 调整。
+RFC 只规定契约。下表列出本文为实现契约所做、RFC 没有规定的决定，评审时逐项确认。宿主进程的进程模型与通信方式见
+RFC #2549 设计 §16 的 D1、D2。
 
 | # | 决定 | 理由 | 状态 |
 | --- | --- | --- | --- |
 | E1 | 版本快照放在数据目录下，以内容摘要命名，设为只读（§3） | 与 Dify 按版本解压插件包的做法一致；只读保证快照不被修改 | 已采用 |
 | E2 | 同机多个实例共用一个数据目录时，每个进程只清理自己创建且不再使用的快照（§3.4） | 防止删除其他实例正在使用的快照 | 待确认：也可以要求每个实例使用独立的数据目录 |
-| E3 | 插件接口的二进制请求体与响应通过数据目录下的临时文件交换（§5.2） | stdin / stdout 通道不适合传大块二进制 | 随 D1 调整：改用 `Pipe` 后直接传 bytes，取消临时文件 |
-| E4 | `ctx.require` 与 `ctx.scopes` 通过回调 Server 实现（§6） | 认证上下文在 Server 进程中 | 随 D2 调整：在宿主进程中本地实现，取消回调 |
+| E3 | 插件接口的二进制请求体与响应以 bytes 直接经 `Pipe` 传递，受同一上限约束（§5.2） | 随 RFC #2549 设计 D1；不需要临时文件及其清理。代价是单个请求的峰值内存约为上限的两倍 | 已采用 |
+| E4 | 插件接口的授权和 `ctx` 上的全部能力在宿主进程本地实现，Server 只找路由、认证和限制请求大小（§5.1、§6） | 随 RFC #2549 设计 D2；不需要回调通道 | 已采用 |
 | E5 | 路由匹配时无参数的路径优先，其次按声明顺序（§5.1） | 与常见 Web 框架一致，避免参数路径吞掉固定路径 | 已采用 |
 | E6 | OpenAPI 的 `operationId` 与 MCP 工具名都是 `<插件名>_<handler>`（§5.4、§5.5） | 稳定、可预测，便于对照 | 已采用 |
 | E7 | MCP 工具复用现有的内部 HTTP 桥接，鉴权走 HTTP 路由本身（§5.5） | 与内置工具一致，不另写一套鉴权 | 已采用 |
