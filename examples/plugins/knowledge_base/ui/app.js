@@ -43,6 +43,7 @@ limitations under the License.
       edited: "已人工编辑", page: "第 {page} 页", chunk_meta: "第 {revision} 版 · {parser} · {count} 个切块",
       chunks_saved: "已保存为第 {revision} 版", restored: "已恢复到第 {revision} 版", reparse_started: "已提交重新解析",
       empty_chunk: "切块不能为空", unsaved: "有未保存的修改", withdraw: "撤销上传", withdrawn: "已撤销上传",
+      mode_auto: "默认解析方式：{parser}，上传后自动处理。可在“编辑”中取消默认。", mode_wait: "未设默认解析方式：上传后等待选择解析方式，确认前可以撤销。",
     },
     en: {
       knowledge_bases: "Knowledge bases", new: "New", name: "Name", description: "Description", cancel: "Cancel",
@@ -74,6 +75,8 @@ limitations under the License.
       chunks_saved: "Saved as revision {revision}", restored: "Restored revision {revision}",
       reparse_started: "Reprocessing submitted", empty_chunk: "Chunks cannot be empty", unsaved: "You have unsaved changes",
       withdraw: "Withdraw", withdrawn: "Upload withdrawn",
+      mode_auto: "Default parser: {parser}. Uploads are processed right away; clear the default under Edit.",
+      mode_wait: "No default parser: uploads wait for a parser and can be withdrawn until then.",
     },
   };
 
@@ -231,6 +234,9 @@ limitations under the License.
     if (!base) return;
     $("#kb-name").textContent = base.name;
     $("#kb-description").textContent = base.description;
+    $("#upload-mode").textContent = base.default_parser
+      ? format(t.mode_auto, { parser: parserName(base.default_parser) })
+      : t.mode_wait;
     await loadDocuments();
   }
 

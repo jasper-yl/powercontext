@@ -253,3 +253,4 @@ td.actions { text-align: right; white-space: nowrap; }
 .hits .page { color: var(--muted); }
 .small { font-size: 12px; }
 .badge.edited { margin-left: 6px; }
+.upload-mode { font-size: 13px; color: var(--accent); }
