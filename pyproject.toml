@@ -191,8 +191,6 @@ dev = [
     "ty>=0.0.24",
     "ruff>=0.15.7",
     "sqlalchemy>=2,<3",
-    # examples/plugins/knowledge_base parses PDFs; deployers install it into the Server environment.
-    "pypdf>=6,<7",
 ]
 
 [tool.uv.sources]

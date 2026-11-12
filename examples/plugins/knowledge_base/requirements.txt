@@ -1,2 +1,0 @@
-# PDF text extraction; install into the Server environment.
-pypdf>=6,<7
