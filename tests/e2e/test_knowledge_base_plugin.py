@@ -15,10 +15,13 @@
 """The knowledge base example plugin serves a complete RAG API through its own routes."""
 
 import asyncio
+import json
 import shutil
 from pathlib import Path
 
-from tests.e2e.plugin_server import running_server, wait_for
+import httpx
+
+from tests.e2e.plugin_server import ADMIN_AUTHORIZATION_VALUE, running_server, wait_for
 
 EXAMPLE = Path(__file__).resolve().parents[2] / "examples" / "plugins" / "knowledge_base"
 API = "/v1/plugins/knowledge-base/api"
@@ -79,6 +82,13 @@ def test_knowledge_bases_hide_scopes_and_search_current_documents(tmp_path):
 
             hits = await search(client, "rotate the signing keys", [kb])
             assert hits[0][0] == "keys.txt"
+            # Without a generation model, ask returns the retrieved passages and no answer.
+            info = await ok(await client.get(f"{API}/info"))
+            assert info["generation_available"] is False and info["can_manage"] is True
+            asked = await ok(
+                await client.post(f"{API}/ask", json={"question": "signing keys", "knowledge_base_ids": [kb]})
+            )
+            assert asked["answer"] is None and asked["citations"][0]["document_name"] == "keys.txt"
             assert (await search(client, "数据库告警", [kb]))[0][0] == "oncall.md"
             assert (await search(client, "rollback release", [kb], mode="keyword"))[0][0] == "deploy.md"
 
@@ -132,5 +142,72 @@ def test_knowledge_bases_hide_scopes_and_search_current_documents(tmp_path):
             assert [item["name"] for item in listed["items"]] == ["Ops"]
             await ok(await client.get(f"{API}/knowledge-bases/{other}"), 404)
             await ok(await client.get(f"{API}/no-such-route"), 404)
+
+    asyncio.run(scenario())
+
+
+def test_dashboard_page_forwards_only_same_origin_session_requests(tmp_path):
+    plugins = tmp_path / "plugins"
+    shutil.copytree(EXAMPLE, plugins / "knowledge-base", ignore=shutil.ignore_patterns("__pycache__"))
+    pages = "/dashboard/plugins/knowledge-base"
+    environment = {
+        "POWERCONTEXT_SERVER_DASHBOARD_ENABLED": "true",
+        # The deployment ceiling caps the upload route's own 8 MiB limit.
+        "POWERCONTEXT_SERVER_PLUGIN_API_MAX_BODY_BYTES": "4096",
+        # pydantic-ai's built-in test model answers every request without a provider.
+        "POWERCONTEXT_SERVER_INFERENCE": json.dumps({"generation_model": "test"}),
+    }
+
+    async def scenario():
+        async with running_server(tmp_path, plugins, extra_env=environment) as client:
+            async with httpx.AsyncClient(base_url=client.base_url, timeout=20) as anonymous:
+                asset = await anonymous.get(f"{pages}/ui/index.html")
+                assert asset.status_code == 200, asset.text
+                policy = asset.headers["content-security-policy"]
+                assert policy.startswith("sandbox allow-scripts") and "allow-same-origin" not in policy
+                # Only page assets are served: never plugin code, never outside the pages directory.
+                for path in ("plugin.py", "../plugin.py", "%2e%2e/plugin.py", "app.js/../../kb_store.py"):
+                    leaked = await anonymous.get(f"{pages}/ui/{path}")
+                    assert leaked.status_code in {401, 404} and b"import" not in leaked.content, path
+                assert (await anonymous.get("/dashboard/plugins/_client.js")).status_code == 200
+                assert (await anonymous.get(pages)).status_code == 401
+                assert (
+                    await anonymous.get(f"{pages}/api/info", headers={"Sec-Fetch-Site": "same-origin"})
+                ).status_code == 401
+
+            session = {"powercontext_dashboard_token": ADMIN_AUTHORIZATION_VALUE}
+            async with httpx.AsyncClient(base_url=client.base_url, cookies=session, timeout=20) as browser:
+                page = await browser.get(pages, params={"lang": "en"})
+                assert page.status_code == 200, page.text
+                assert 'sandbox="allow-scripts' in page.text and "Knowledge bases" in page.text
+                assert f'href="{pages}?' in (await browser.get("/dashboard/home")).text
+
+                same_origin = {"Sec-Fetch-Site": "same-origin"}
+                forward = f"{pages}/api/knowledge-bases"
+                created = await browser.post(forward, json={"name": "Docs"}, headers=same_origin)
+                assert created.status_code == 200, created.text
+                # The framed page is cross-site with an opaque origin; neither form is forwarded.
+                for headers in ({"Sec-Fetch-Site": "cross-site"}, {"Origin": "null"}, {}):
+                    assert (await browser.post(forward, json={"name": "X"}, headers=headers)).status_code == 403
+
+                upload = f"{forward}/{created.json()['id']}/documents"
+                large = await browser.post(upload, params={"name": "big.md"}, content=b"x" * 5000, headers=same_origin)
+                assert large.status_code == 413, large.text
+                small = await browser.post(
+                    upload, params={"name": "tls.md"}, content=b"Renew TLS certificates.", headers=same_origin
+                )
+                assert small.status_code == 200, small.text
+
+            async def documents():
+                return (await client.get(f"{API}/knowledge-bases/{created.json()['id']}/documents")).json()["items"]
+
+            await wait_for(
+                documents, lambda value: value and value[0]["status"] == "ready", log=tmp_path / "server.log"
+            )
+            asked = await client.post(
+                f"{API}/ask", json={"question": "certificates", "knowledge_base_ids": [created.json()["id"]]}
+            )
+            assert asked.status_code == 200, asked.text
+            assert asked.json()["answer"] and asked.json()["citations"][0]["document_name"] == "tls.md"
 
     asyncio.run(scenario())

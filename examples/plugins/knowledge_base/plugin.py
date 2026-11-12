@@ -18,7 +18,9 @@ Callers see knowledge bases and documents only. Creating a knowledge base create
 Scope and records the mapping in the plugin's own storage; uploads keep their bytes
 there by content digest and submit a Source that records only the digest; generation
 chunks and embeds the text into plugin storage and writes the ``document`` Artifact.
-Search ranks chunks of current documents by keyword and vector similarity.
+Search ranks chunks of current documents by keyword and vector similarity; ``ask``
+answers a question from the top chunks with the Server's generation model. The
+``ui`` directory is the Dashboard page for managing knowledge bases.
 """
 
 from __future__ import annotations
@@ -37,11 +39,13 @@ from powercontext.plugins import (
     ArtifactPlugin,
     ArtifactWriter,
     BinaryResponse,
+    ChatMessage,
     ForgetRequest,
     GenerateRequest,
     Inputs,
     PluginApi,
     PluginContext,
+    PluginPages,
     RestoreRequest,
     Route,
 )
@@ -193,6 +197,32 @@ class SearchResult(BaseModel):
     hits: list[SearchHit]
 
 
+class Question(BaseModel):
+    question: str = Field(min_length=1, max_length=2000)
+    knowledge_base_ids: list[str] = Field(min_length=1, max_length=20)
+    limit: int = Field(default=5, ge=1, le=20)
+
+
+class Answer(BaseModel):
+    # None when the Server has no generation model; the citations are still the retrieved chunks.
+    answer: str | None
+    citations: list[SearchHit]
+
+
+class PluginInfo(BaseModel):
+    embedding_profile: str
+    generation_available: bool
+    # Creating and deleting knowledge bases needs server.admin.
+    can_manage: bool
+    max_upload_bytes: int
+
+
+ANSWER_INSTRUCTIONS = (
+    "Answer the question using only the numbered passages. Cite passages as [1], [2]. "
+    "If the passages do not contain the answer, say so. Answer in the language of the question."
+)
+
+
 def document_id(knowledge_base_id: str, name: str) -> str:
     """One document per file name; uploading the same name again adds a revision."""
 
@@ -203,11 +233,12 @@ class KnowledgeBasePlugin:
     def __init__(self, ctx: PluginContext, store: KnowledgeBaseStore) -> None:
         self.ctx = ctx
         self.store = store
+        self.served = ctx.models is not None and ctx.models.embedding_available
         dimension = None if ctx.models is None else ctx.models.embedding_dimension
-        self.profile = "hash-256" if dimension is None else f"server-{dimension}"
+        self.profile = f"server-{dimension}" if self.served else "hash-256"
 
     async def _embed(self, texts: list[str]) -> list[tuple[float, ...]]:
-        if self.ctx.models is None or not texts:
+        if not self.served or self.ctx.models is None or not texts:
             return [hash_embedding(text) for text in texts]
         return list(await self.ctx.models.embed(texts))
 
@@ -225,6 +256,14 @@ class KnowledgeBasePlugin:
             name=record["name"],
             description=record["description"],
             created_at=record["created_at"].isoformat(),
+        )
+
+    async def info(self, request: ApiRequest) -> PluginInfo:
+        return PluginInfo(
+            embedding_profile=self.profile,
+            generation_available=self.ctx.models is not None and self.ctx.models.generation_available,
+            can_manage=await self.ctx.allowed("server.admin"),
+            max_upload_bytes=MAX_UPLOAD_BYTES,
         )
 
     # Knowledge bases
@@ -273,9 +312,10 @@ class KnowledgeBasePlugin:
         media_type = media_type_for(name)
         if not name or media_type is None:
             raise ApiError(415, "unsupported_document", "Upload a .md, .markdown, or .txt file with ?name=.")
+        # The route declares MAX_UPLOAD_BYTES; core rejects larger bodies before this handler runs.
         content: bytes = request.body
-        if not content or len(content) > MAX_UPLOAD_BYTES:
-            raise ApiError(413 if content else 400, "invalid_document_size", "The document is empty or too large.")
+        if not content:
+            raise ApiError(400, "empty_document", "The document is empty.")
         try:
             decode(content)
         except UnicodeDecodeError:
@@ -380,8 +420,29 @@ class KnowledgeBasePlugin:
 
     async def search(self, request: ApiRequest) -> SearchResult:
         body: SearchQuery = request.body
+        return SearchResult(hits=await self._search(body.query, body.knowledge_base_ids, body.limit, body.mode))
+
+    async def ask(self, request: ApiRequest) -> Answer:
+        body: Question = request.body
+        hits = await self._search(body.question, body.knowledge_base_ids, body.limit, "hybrid")
+        models = self.ctx.models
+        if not hits or models is None or not models.generation_available:
+            return Answer(answer=None, citations=hits)
+        passages = "\n\n".join(f"[{number}] ({hit.document_name})\n{hit.text}" for number, hit in enumerate(hits, 1))
+        answer = await models.generate(
+            [
+                ChatMessage(role="system", content=ANSWER_INSTRUCTIONS),
+                ChatMessage(role="user", content=f"Passages:\n\n{passages}\n\nQuestion: {body.question}"),
+            ],
+            max_tokens=800,
+        )
+        return Answer(answer=answer.strip() or None, citations=hits)
+
+    async def _search(
+        self, query: str, knowledge_base_ids: list[str], limit: int, mode: Literal["hybrid", "keyword", "vector"]
+    ) -> list[SearchHit]:
         candidates: list[tuple[str, str, str, dict[str, Any]]] = []
-        for kb_id in dict.fromkeys(body.knowledge_base_ids):
+        for kb_id in dict.fromkeys(knowledge_base_ids):
             record = await self._knowledge_base(kb_id, "scope.read")
             documents = {
                 identity: document
@@ -397,38 +458,36 @@ class KnowledgeBasePlugin:
                 identity = digests[row["sha256"]]
                 candidates.append((kb_id, identity, documents[identity].name, row))
         if not candidates:
-            return SearchResult(hits=[])
+            return []
         texts = [row["text"] for _, _, _, row in candidates]
         rankings = []
         scores: dict[int, float] = {}
-        if body.mode in {"hybrid", "keyword"}:
-            keyword = bm25(body.query, texts)
+        if mode in {"hybrid", "keyword"}:
+            keyword = bm25(query, texts)
             rankings.append([
                 index for index in sorted(range(len(texts)), key=lambda i: -keyword[i]) if keyword[index] > 0
             ])
             # Keyword search returns only chunks that share a term with the query.
             scores = {index: score for index, score in enumerate(keyword) if score > 0}
-        if body.mode in {"hybrid", "vector"}:
-            (query_vector,) = await self._embed([body.query])
+        if mode in {"hybrid", "vector"}:
+            (query_vector,) = await self._embed([query])
             similarity = [cosine(query_vector, row["vector"]) for _, _, _, row in candidates]
             rankings.append(sorted(range(len(texts)), key=lambda i: -similarity[i]))
             scores = dict(enumerate(similarity))
-        if body.mode == "hybrid":
+        if mode == "hybrid":
             scores = reciprocal_rank_fusion(rankings)
-        ranked = sorted(scores, key=lambda index: -scores[index])[: body.limit]
-        return SearchResult(
-            hits=[
-                SearchHit(
-                    knowledge_base_id=candidates[index][0],
-                    document_id=candidates[index][1],
-                    document_name=candidates[index][2],
-                    chunk_index=candidates[index][3]["chunk_index"],
-                    text=candidates[index][3]["text"],
-                    score=round(scores[index], 6),
-                )
-                for index in ranked
-            ]
-        )
+        ranked = sorted(scores, key=lambda index: -scores[index])[:limit]
+        return [
+            SearchHit(
+                knowledge_base_id=candidates[index][0],
+                document_id=candidates[index][1],
+                document_name=candidates[index][2],
+                chunk_index=candidates[index][3]["chunk_index"],
+                text=candidates[index][3]["text"],
+                score=round(scores[index], 6),
+            )
+            for index in ranked
+        ]
 
     # Generation: chunk and embed outside the write transaction, then commit the documents.
 
@@ -495,6 +554,7 @@ plugin = ArtifactPlugin(
     definitions=(DocumentUploadDefinition(),),
     api=PluginApi(
         routes=(
+            _route("GET", "/info", "info", response_model=PluginInfo),
             _route(
                 "POST",
                 "/knowledge-bases",
@@ -515,7 +575,12 @@ plugin = ArtifactPlugin(
             ),
             _route("DELETE", "/knowledge-bases/{kb_id}", "delete_knowledge_base"),
             _route(
-                "POST", "/knowledge-bases/{kb_id}/documents", "upload_document", body="binary", response_model=Document
+                "POST",
+                "/knowledge-bases/{kb_id}/documents",
+                "upload_document",
+                body="binary",
+                max_body_bytes=MAX_UPLOAD_BYTES,
+                response_model=Document,
             ),
             _route("GET", "/knowledge-bases/{kb_id}/documents", "list_documents", response_model=DocumentPage),
             _route("GET", "/knowledge-bases/{kb_id}/documents/{document_id}", "get_document", response_model=Document),
@@ -530,7 +595,18 @@ plugin = ArtifactPlugin(
                 response_model=SearchResult,
                 description="Search the chunks of current documents in the given knowledge bases.",
             ),
+            _route(
+                "POST",
+                "/ask",
+                "ask",
+                body="json",
+                request_model=Question,
+                response_model=Answer,
+                timeout_seconds=90,
+                description="Answer a question from the given knowledge bases, citing the retrieved chunks.",
+            ),
         )
     ),
+    pages=PluginPages(directory="ui", entry="index.html", title={"zh": "知识库", "en": "Knowledge bases"}),
     create=create,
 )
