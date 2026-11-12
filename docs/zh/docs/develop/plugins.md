@@ -330,6 +330,13 @@ plugin = ArtifactPlugin(..., pages=PluginPages(directory="ui", entry="index.html
 - 只提供静态文件（HTML、JavaScript、CSS、图片、字体），单个文件不超过 5 MiB；脚本只能来自插件自己的目录和
   `/dashboard/plugins/_client.js`。
 
+## 完整示例
+
+仓库中的 [知识库（RAG）插件](https://github.com/oceanbase/powercontext/tree/master/examples/plugins/knowledge_base)
+用到了本文的全部能力：用 `ctx.scopes` 把每个知识库建成一个 Scope，自定义"上传"和"切块编辑"两种 Source 类型，在
+`generate` 中解析文件和生成向量，提供上传、检索、问答等接口，以及一个完整的 Dashboard 页面。它的 README 说明了如何部署
+和使用。
+
 ## 排错
 
 | 现象 | 处理 |
