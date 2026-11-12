@@ -118,7 +118,7 @@ def test_knowledge_bases_hide_scopes_and_process_uploads_with_the_chosen_parser(
             assert submitted == {"submitted": 3}
             ready = await wait_for(
                 lambda: documents(client, kb),
-                lambda value: all(item["status"] == "ready" for item in value.values()),
+                lambda value: len(value) == 3 and all(item["status"] == "ready" for item in value.values()),
                 log=log,
             )
             assert ready["deploy.md"]["chunk_count"] >= 1 and ready["deploy.md"]["revision"] == 1

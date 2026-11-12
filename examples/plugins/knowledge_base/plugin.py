@@ -634,7 +634,9 @@ class KnowledgeBasePlugin:
             status: DocumentStatus | None = None
             if submission["source_id"] is None:
                 status = "pending_config"
-            elif submission["processed_at"] is None:
+            elif submission["processed_at"] is None or await reads.get(identity) is None:
+                # Generation marks a submission before its commit, so a new document has no
+                # Artifact for a moment; it is still processing, not gone.
                 status = "processing"
             if status is not None:
                 current = documents.get(identity)
