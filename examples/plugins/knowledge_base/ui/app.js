@@ -44,6 +44,7 @@ limitations under the License.
       edited: "已人工编辑", page: "第 {page} 页", chunk_meta: "第 {revision} 版 · {parser} · {count} 个切块",
       chunks_saved: "已保存为第 {revision} 版", restored: "已恢复到第 {revision} 版", reparse_started: "已提交重新解析",
       empty_chunk: "切块不能为空", unsaved: "有未保存的修改", withdraw: "撤销上传", withdrawn: "已撤销上传",
+      chunks_applying: "已提交修改，正在应用…", chunks_conflict: "修改未生效：文档在你编辑期间被修改，请重新打开后再编辑",
       mode_auto: "默认解析方式：{parser}，上传后自动处理。可在“编辑”中取消默认。", mode_wait: "未设默认解析方式：上传后等待选择解析方式，确认前可以撤销。",
     },
     en: {
@@ -77,6 +78,8 @@ limitations under the License.
       chunks_saved: "Saved as revision {revision}", restored: "Restored revision {revision}",
       reparse_started: "Reprocessing submitted", empty_chunk: "Chunks cannot be empty", unsaved: "You have unsaved changes",
       withdraw: "Withdraw", withdrawn: "Upload withdrawn",
+      chunks_applying: "Edit submitted; applying…",
+      chunks_conflict: "The edit was not applied: the document changed while you edited it. Reopen and edit again.",
       mode_auto: "Default parser: {parser}. Uploads are processed right away; clear the default under Edit.",
       mode_wait: "No default parser: uploads wait for a parser and can be withdrawn until then.",
     },
@@ -449,10 +452,25 @@ limitations under the License.
     }));
     if (!chunks.length || chunks.some(chunk => !chunk.text)) { toast(t.empty_chunk, true); return; }
     const { item, path, view } = state.open;
-    const saved = (await call("PUT", `${path}/chunks`, { json: { expected_revision: view.revision, chunks } })).json;
-    toast(format(t.chunks_saved, { revision: saved.revision }));
-    await loadDocuments();
-    await openChunks({ ...item, revision: saved.revision });
+    const save = $("#chunk-save");
+    save.disabled = true;
+    try {
+      await call("PUT", `${path}/chunks`, { json: { expected_revision: view.revision, chunks } });
+      toast(t.chunks_applying);
+      // The edit is applied in the background; a new revision means it took effect.
+      let document = null;
+      for (let attempt = 0; attempt < 90; attempt++) {
+        document = (await call("GET", path)).json;
+        if (document.status !== "processing") break;
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+      await loadDocuments();
+      if (document && document.revision > view.revision) toast(format(t.chunks_saved, { revision: document.revision }));
+      else toast(t.chunks_conflict, true);
+      await openChunks(item);
+    } finally {
+      save.disabled = false;
+    }
   });
 
   $("#chunk-restore").addEventListener("click", async () => {

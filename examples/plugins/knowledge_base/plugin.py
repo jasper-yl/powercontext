@@ -54,16 +54,19 @@ from powercontext.plugins import (
     RestoreRequest,
     Route,
 )
-from powercontext.sources import Source, SourceMaterialization
+from powercontext.sources import Source, SourceMaterialization, SourceRef
 
 FAMILY = "document"
 DOCUMENT_SOURCE = "kb-document"
-PROJECTION = "knowledge-base.document"
+EDIT_SOURCE = "kb-chunk-edit"
+# Generation receives both Source types through one Projection.
+PROJECTION = "knowledge-base.request"
 MAX_UPLOAD_BYTES = 32 * 1024 * 1024
 MAX_CHUNKS = 2000
 
 
-# The processing Source: the bytes stay in plugin storage; the Source records which file and which parser.
+# Sources record what users asked for. An upload records which file and which parser; the bytes stay in plugin
+# storage. A chunk edit records who edited which revision and the chunk set they saved.
 
 
 class DocumentUpload(BaseModel):
@@ -87,30 +90,73 @@ class DocumentUploadSource(Source):
     parser: ParserChoice
 
 
+class ChunkEditRecord(BaseModel):
+    edit_id: str
+    knowledge_base_id: str
+    document_id: str
+    base_revision: int
+    chunk_set: str
+    chunk_count: int
+    edited_by: str
+
+
+class ChunkEditSource(Source):
+    knowledge_base_id: str
+    document_id: str
+    base_revision: int
+    chunk_set: str
+    chunk_count: int
+    edited_by: str
+
+
+class KnowledgeBaseRequest(BaseModel):
+    """What generation receives for either Source type."""
+
+    upload: DocumentUpload | None = None
+    edit: ChunkEditRecord | None = None
+
+
+def _upload(source: DocumentUploadSource) -> DocumentUpload:
+    return DocumentUpload(
+        upload_id=source.name,
+        knowledge_base_id=source.knowledge_base_id,
+        name=source.file_name,
+        media_type=source.media_type,
+        sha256=source.sha256,
+        size=source.size,
+        uploaded_by=source.uploaded_by,
+        parser=source.parser,
+    )
+
+
+def _edit(source: ChunkEditSource) -> ChunkEditRecord:
+    return ChunkEditRecord(
+        edit_id=source.name,
+        knowledge_base_id=source.knowledge_base_id,
+        document_id=source.document_id,
+        base_revision=source.base_revision,
+        chunk_set=source.chunk_set,
+        chunk_count=source.chunk_count,
+        edited_by=source.edited_by,
+    )
+
+
 class DocumentUploadProjection:
     name = PROJECTION
-    version = "2"
+    version = "1"
     source_class = DocumentUploadSource
-    output_class: type[BaseModel] = DocumentUpload
+    output_class: type[BaseModel] = KnowledgeBaseRequest
 
-    def project(self, source: DocumentUploadSource, /) -> DocumentUpload:
-        return DocumentUpload(
-            upload_id=source.name,
-            knowledge_base_id=source.knowledge_base_id,
-            name=source.file_name,
-            media_type=source.media_type,
-            sha256=source.sha256,
-            size=source.size,
-            uploaded_by=source.uploaded_by,
-            parser=source.parser,
-        )
+    def project(self, source: DocumentUploadSource, /) -> KnowledgeBaseRequest:
+        return KnowledgeBaseRequest(upload=_upload(source))
 
 
 class DocumentUploadDefinition:
     input_class = DocumentUpload
     name = DOCUMENT_SOURCE
     source_class = DocumentUploadSource
-    version = "2"
+    # Version 3 delivers uploads through the shared request Projection.
+    version = "3"
     projections = (DocumentUploadProjection(),)
 
     async def resolve(self, value: DocumentUpload, /) -> DocumentUploadSource:
@@ -129,7 +175,42 @@ class DocumentUploadDefinition:
         )
 
     async def read(self, source: DocumentUploadSource, /) -> DocumentUpload:
-        return DocumentUploadProjection().project(source)
+        return _upload(source)
+
+
+class ChunkEditProjection:
+    name = PROJECTION
+    version = "1"
+    source_class = ChunkEditSource
+    output_class: type[BaseModel] = KnowledgeBaseRequest
+
+    def project(self, source: ChunkEditSource, /) -> KnowledgeBaseRequest:
+        return KnowledgeBaseRequest(edit=_edit(source))
+
+
+class ChunkEditDefinition:
+    input_class = ChunkEditRecord
+    name = EDIT_SOURCE
+    source_class = ChunkEditSource
+    version = "1"
+    projections = (ChunkEditProjection(),)
+
+    async def resolve(self, value: ChunkEditRecord, /) -> ChunkEditSource:
+        return ChunkEditSource(
+            name=value.edit_id,
+            definition_version=self.version,
+            materialization=SourceMaterialization.CAPTURED,
+            description="A user's edit of a knowledge base document's chunks; the chunks live in the plugin's storage.",
+            knowledge_base_id=value.knowledge_base_id,
+            document_id=value.document_id,
+            base_revision=value.base_revision,
+            chunk_set=value.chunk_set,
+            chunk_count=value.chunk_count,
+            edited_by=value.edited_by,
+        )
+
+    async def read(self, source: ChunkEditSource, /) -> ChunkEditRecord:
+        return _edit(source)
 
 
 # API models
@@ -652,26 +733,45 @@ class KnowledgeBasePlugin:
             raise ApiError(409, "document_not_ready", "Only processed documents have chunks to edit.")
         scope_id = record["scope_id"]
         set_id = await self.store.save_chunk_set(scope_id, [(item.text.strip(), item.page) for item in body.chunks])
-        # Embed before the transaction; the vectors are keyed by set and reused if the write is retried.
-        await self._indexed(scope_id, [set_id])
-        edited = content.model_copy(update={"chunk_set": set_id, "chunk_count": len(body.chunks), "edited": True})
-        async with writer.transaction() as tx:
-            snapshot = await tx.put(
-                identity,
-                content=edited.model_dump(mode="json"),
-                expected_revision=body.expected_revision,
-            )
+        # The edit is a Source, so the new revision records who edited it; generation applies it
+        # only if the document is still at the revision the user edited.
+        submission = await self.store.add_submission(
+            scope_id,
+            submission_id=f"kbedit_{uuid4().hex}",
+            document_id=identity,
+            name=content.name,
+            sha256=content.sha256,
+            media_type=content.media_type,
+            size=content.size,
+            uploaded_by=content.uploaded_by,
+        )
+        ref = await self.ctx.sources.submit(
+            scope_id,
+            EDIT_SOURCE,
+            ChunkEditRecord(
+                edit_id=submission["submission_id"],
+                knowledge_base_id=record["kb_id"],
+                document_id=identity,
+                base_revision=body.expected_revision,
+                chunk_set=set_id,
+                chunk_count=len(body.chunks),
+                edited_by=request.caller.principal_id,
+            ),
+        )
+        await self.store.mark_submitted(
+            scope_id, submission["submission_id"], ref.source_id, content.parser.model_dump(mode="json")
+        )
         return Document(
             id=identity,
             knowledge_base_id=record["kb_id"],
-            name=edited.name,
-            status=edited.status,
-            media_type=edited.media_type,
-            size=edited.size,
-            parser=edited.parser,
-            chunk_count=edited.chunk_count,
-            edited=True,
-            revision=snapshot.ref.revision,
+            name=content.name,
+            status="processing",
+            media_type=content.media_type,
+            size=content.size,
+            parser=content.parser,
+            chunk_count=content.chunk_count,
+            edited=content.edited,
+            revision=current.ref.revision,
         )
 
     async def restore_revision(self, request: ApiRequest) -> None:
@@ -766,9 +866,16 @@ class KnowledgeBasePlugin:
     # Generation: parse and embed outside the write transaction, then commit the documents.
 
     async def generate(self, request: GenerateRequest, writer: ArtifactWriter) -> None:
-        planned = []
+        planned: list[tuple[str, DocumentContent | ChunkEditRecord, SourceRef]] = []
         for source in request.sources:
-            upload = DocumentUpload.model_validate(source.projection)
+            item = KnowledgeBaseRequest.model_validate(source.projection)
+            if item.edit is not None:
+                # Edited chunks are already stored; embed them before the transaction.
+                await self._indexed(request.scope_id, [item.edit.chunk_set])
+                planned.append((item.edit.document_id, item.edit, source.ref))
+                continue
+            assert item.upload is not None  # noqa: S101 - every request carries an upload or an edit
+            upload = item.upload
             content = DocumentContent(
                 knowledge_base_id=upload.knowledge_base_id,
                 name=upload.name,
@@ -793,10 +900,28 @@ class KnowledgeBasePlugin:
             planned.append((document_id(upload.knowledge_base_id, upload.name), content, source.ref))
         # Marked before the commit: if the commit fails, core delivers the Sources again and
         # this runs again, so the mark is at worst briefly ahead of the document.
-        await self.store.mark_processed(request.scope_id, [content.submission_id for _, content, _ in planned])
+        await self.store.mark_processed(
+            request.scope_id,
+            [item.edit_id if isinstance(item, ChunkEditRecord) else item.submission_id for _, item, _ in planned],
+        )
         async with writer.transaction() as tx:
-            for identity, content, ref in planned:
-                await tx.put(identity, content=content.model_dump(mode="json"), source_refs=[ref])
+            for identity, item, ref in planned:
+                if isinstance(item, DocumentContent):
+                    await tx.put(identity, content=item.model_dump(mode="json"), source_refs=[ref])
+                    continue
+                current = await tx.get(identity)
+                if current is None or current.ref.revision != item.base_revision:
+                    # The document changed after the user read it; the edit is not applied.
+                    continue
+                edited = DocumentContent.model_validate(current.content).model_copy(
+                    update={
+                        "chunk_set": item.chunk_set,
+                        "chunk_count": item.chunk_count,
+                        "edited": True,
+                        "submission_id": item.edit_id,
+                    }
+                )
+                await tx.put(identity, content=edited.model_dump(mode="json"), source_refs=[ref])
 
     async def _parsed(self, scope_id: str, upload: DocumentUpload) -> str:
         """The chunk set of a file under a parser profile; the same file and settings are parsed once."""
@@ -844,11 +969,11 @@ DOC = KB + "/documents/{document_id}"
 
 plugin = ArtifactPlugin(
     family=FAMILY,
-    inputs=Inputs(source_types=(DOCUMENT_SOURCE,), projection=f"{PROJECTION}@2", max_sources=20),
+    inputs=Inputs(source_types=(DOCUMENT_SOURCE, EDIT_SOURCE), projection=f"{PROJECTION}@1", max_sources=20),
     on_sources=True,
     search_fields=("name",),
     timeout_seconds=900,
-    definitions=(DocumentUploadDefinition(),),
+    definitions=(DocumentUploadDefinition(), ChunkEditDefinition()),
     api=PluginApi(
         routes=(
             _route("GET", "/info", "info", response_model=PluginInfo),

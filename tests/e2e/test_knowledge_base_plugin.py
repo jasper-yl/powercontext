@@ -166,14 +166,42 @@ def test_knowledge_bases_hide_scopes_and_process_uploads_with_the_chosen_parser(
                 "expected_revision": 1,
                 "chunks": [{"text": "Rotate signing keys every 30 days; audit with keyctl."}],
             }
-            edited = await ok(await client.put(chunks_path, json=edit))
-            assert (edited["revision"], edited["edited"], edited["chunk_count"]) == (2, True, 1)
+            # The edit is submitted as a Source and applied in the background.
+            submitted_edit = await ok(await client.put(chunks_path, json=edit))
+            assert (submitted_edit["status"], submitted_edit["revision"]) == ("processing", 1)
+            applied = await wait_for(
+                lambda: documents(client, kb),
+                lambda value: value["keys.txt"]["status"] == "ready" and value["keys.txt"]["revision"] == 2,
+                log=log,
+            )
+            assert (applied["keys.txt"]["edited"], applied["keys.txt"]["chunk_count"]) == (True, 1)
             assert (await search(client, "keyctl", [kb], mode="keyword"))[0][0] == "keys.txt"
             await ok(await client.put(chunks_path, json=edit), 409)
+            # The edited revision's provenance is the edit Source, which records the editor.
+            scopes = (await ok(await client.get("/v1/scopes")))["items"]
+            scope = next(item["scope_id"] for item in scopes if item["title"] == "Ops")
+            revision = await ok(await client.get(f"/v1/scopes/{scope}/artifacts/document/{keys}"))
+            (edit_source,) = revision["sources"]
+            assert edit_source["source_type"] == "kb-chunk-edit"
+            stored_edit = await ok(
+                await client.get(f"/v1/scopes/{scope}/sources/kb-chunk-edit/{edit_source['source_id']}")
+            )
+            payload = stored_edit["content"]["payload"]
+            assert (payload["base_revision"], payload["edited_by"]) == (1, "service:server-token")
+            # Two edits of the same revision: the first applies, the second finds the document changed and is dropped.
+            for text in ("First edit wins.", "Second edit is dropped."):
+                await ok(await client.put(chunks_path, json={"expected_revision": 2, "chunks": [{"text": text}]}))
+            settled = await wait_for(
+                lambda: documents(client, kb), lambda value: value["keys.txt"]["status"] == "ready", log=log
+            )
+            assert settled["keys.txt"]["revision"] == 3
+            assert [chunk["text"] for chunk in (await ok(await client.get(chunks_path)))["chunks"]] == [
+                "First edit wins."
+            ]
             assert "monthly" in (await ok(await client.get(chunks_path, params={"revision": "1"})))["chunks"][0]["text"]
             await ok(await client.post(f"{documents_path}/{keys}/restorations", json={"revision": 1}), 204)
             restored = await ok(await client.get(chunks_path))
-            assert restored["revision"] == 3 and restored["edited"] is False
+            assert restored["revision"] == 4 and restored["edited"] is False
             assert await search(client, "keyctl", [kb], mode="keyword") == []
 
             # Reprocessing a document with another parser adds a revision parsed that way.
@@ -181,14 +209,14 @@ def test_knowledge_bases_hide_scopes_and_process_uploads_with_the_chosen_parser(
             await ok(await client.post(processing, json={"parser": fixed, "document_ids": [keys]}))
             reparsed = await wait_for(
                 lambda: documents(client, kb),
-                lambda value: value["keys.txt"]["status"] == "ready" and value["keys.txt"]["revision"] == 4,
+                lambda value: value["keys.txt"]["status"] == "ready" and value["keys.txt"]["revision"] == 5,
                 log=log,
             )
             assert reparsed["keys.txt"]["parser"] == fixed
             # Restoring a revision parsed earlier does not make the document look unprocessed.
             await ok(await client.post(f"{documents_path}/{keys}/restorations", json={"revision": 1}), 204)
             back = (await documents(client, kb))["keys.txt"]
-            assert (back["status"], back["revision"], back["parser"]["name"]) == ("ready", 5, "paragraph")
+            assert (back["status"], back["revision"], back["parser"]["name"]) == ("ready", 6, "paragraph")
 
             # PDFs are parsed page by page, and every chunk keeps its page.
             runbook = pdf("Disk alerts page the storage team.", "Rotate TLS certificates every 90 days.")
