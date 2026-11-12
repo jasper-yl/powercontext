@@ -354,6 +354,13 @@ plugin = ArtifactPlugin(..., pages=PluginPages(directory="ui", entry="index.html
 - Pages are static files only (HTML, JavaScript, CSS, images, fonts), up to 5 MiB each; scripts may come only from the
   plugin's own directory and `/dashboard/plugins/_client.js`.
 
+## A complete example
+
+The repository's [knowledge base (RAG) plugin](https://github.com/oceanbase/powercontext/tree/master/examples/plugins/knowledge_base)
+uses everything in this guide: it makes each knowledge base a Scope through `ctx.scopes`, defines "upload" and "chunk
+edit" Source types, parses files and computes vectors in `generate`, provides upload, search, and question-answering
+APIs, and ships a full Dashboard page. Its README explains how to deploy and use it.
+
 ## Troubleshooting
 
 | Symptom | What to do |
