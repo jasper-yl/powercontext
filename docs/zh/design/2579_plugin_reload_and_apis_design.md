@@ -174,6 +174,24 @@ Server 启动时，在第一次扫描生成当前快照之后，删除 `plugin-v
   `last_check_failure`。
 - binding 只由领导者注册；领导权转移时新领导者按本实例的记录注册。
 
+### 4.7 数据升级
+
+```text
+宿主进程启动（新快照）
+  -> 导入插件，核对声明，打开数据库、授权服务、专属存储和模型
+  -> 声明了 upgrade：以插件自身身份执行 upgrade(ctx)，受 upgrade_timeout_seconds 约束
+       -> 异常或超时：发送 HostFailed(category="upgrade_failed")，进程退出
+  -> 执行 create(ctx)，发送 HostReady
+```
+
+- `upgrade` 期间 `ctx` 的请求辅助方法处于"插件身份"模式：`reads`、`writer` 不检查调用者，不要求先 `require`；`caller`、
+  `require`、`sources`、`scopes` 不可用。`create` 之后恢复为按请求调用者执行。
+- Server 收到 `upgrade_failed` 时按检查失败处理（§4.3），记录 `upgrade_failed` 事件；不进入宿主进程的重启退避，下一个版本
+  被扫描到时再尝试。
+- 声明了 `upgrade` 的插件在加载时立即启动宿主进程。Server 启动时，这类插件的 binding 在宿主进程就绪后才注册；热加载时，
+  §4.5 中新宿主进程就绪后才切换快照，后台调用自然从切换后开始使用新快照。
+- 宿主进程因崩溃而重启时会再次执行 `upgrade`，与"每次加载都调用"的约定一致，插件本来就要保证可重复执行。
+
 ---
 
 ## 5. 插件路由
@@ -355,6 +373,7 @@ window.onmessage(event):
 | 二进制请求体与响应上限 | 32 MiB | `POWERCONTEXT_SERVER_PLUGIN_API_MAX_BODY_BYTES` |
 | 页面静态文件上限 | 5 MiB | 固定 |
 | `_client.js` 请求超时 | 60 秒 | 插件页面可传入 |
+| 数据升级时限 | 600 秒 | 声明 `upgrade_timeout_seconds` |
 
 ---
 
@@ -372,6 +391,7 @@ window.onmessage(event):
 | T8 | `/v1/plugins` 响应字段与可观测性 | T3、T4 |
 | T9 | 浏览器验证：CSP `sandbox` 下 `'self'` 的匹配、不透明来源请求的 cookie 行为，在 Chromium、Firefox、Safari 上执行 | T7 |
 | T10 | MCP 工具：生成、注解、热加载时增删与通知 | T3、T4 |
+| T11 | 数据升级：宿主进程启动时执行 `upgrade`、插件身份上下文、`upgrade_failed` 的处理、binding 等待就绪 | T3、T5 |
 
 ---
 
@@ -400,3 +420,6 @@ RFC #2549 设计 §16 的 D1、D2。
 | E7 | MCP 工具复用现有的内部 HTTP 桥接，鉴权走 HTTP 路由本身（§5.5） | 与内置工具一致，不另写一套鉴权 | 已采用 |
 | E8 | 插件页面跳转或刷新后显示"重新打开插件页面"，重建 iframe 后恢复转发（§7.3） | 页面跳转后无法区分插件页面与外部页面 | 已采用 |
 | E9 | 静态文件以 `<版本摘要>:<相对路径>` 作为 ETag 并设 `no-cache`（§7.2） | 切换版本后浏览器立即取到新文件 | 已采用 |
+| E10 | `upgrade` 在新宿主进程中、`create` 之前执行，而不是另起一个子进程（§4.7） | 宿主进程本来就要在使用新版本前启动，复用它的运行时和资源；执行失败等同于新宿主进程启动失败，沿用现有的保留旧版本流程 | 待确认 |
+| E11 | `upgrade` 期间 `reads`、`writer` 以插件身份执行，不提供调用者相关的能力（§4.7） | 升级没有请求调用者，与 Worker 的权限模型一致 | 待确认 |
+| E12 | 宿主进程崩溃重启时再次执行 `upgrade`（§4.7） | 与"每次加载都调用、必须可重复执行"的约定一致，不需要额外记录"本进程是否已升级" | 待确认 |

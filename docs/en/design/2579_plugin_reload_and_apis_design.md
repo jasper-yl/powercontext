@@ -187,6 +187,27 @@ the new snapshot once the backoff ends.
   `declaration_digest`, `state`, `activated_at`, and `last_check_failure`.
 - Only the leader registers bindings; when leadership moves, the new leader registers from its own record.
 
+### 4.7 Data upgrades
+
+```text
+host process starts (new snapshot)
+  -> import the plugin, verify the declaration, open the database, authorization, dedicated storage, and models
+  -> upgrade declared: run upgrade(ctx) as the plugin itself, bounded by upgrade_timeout_seconds
+       -> exception or timeout: send HostFailed(category="upgrade_failed") and exit
+  -> run create(ctx), send HostReady
+```
+
+- During `upgrade`, the request helpers on `ctx` act as the plugin: `reads` and `writer` do not check a caller and need no
+  prior `require`; `caller`, `require`, `sources`, and `scopes` are unavailable. After `create`, they act as each
+  request's caller again.
+- When the Server receives `upgrade_failed`, it handles it as a check failure (§4.3) and records an `upgrade_failed`
+  event. The host process does not enter restart backoff; the next scanned version tries again.
+- Plugins that declare `upgrade` start their host process as soon as they load. At Server startup, their bindings register
+  only after the host process is ready; on hot reload, §4.5 switches snapshots only after the new host process is ready,
+  so background calls use the new snapshot only after the switch.
+- A host process restarted after a crash runs `upgrade` again, as "called on every load" implies; plugins must make it
+  safe to repeat anyway.
+
 ---
 
 ## 5. Plugin routes
@@ -381,6 +402,7 @@ Metrics:
 | Binary request body and response limit | 32 MiB | `POWERCONTEXT_SERVER_PLUGIN_API_MAX_BODY_BYTES` |
 | Page static file limit | 5 MiB | Fixed |
 | `_client.js` request timeout | 60 seconds | Plugin pages may pass their own |
+| Data upgrade time limit | 600 seconds | Declaration `upgrade_timeout_seconds` |
 
 ---
 
@@ -398,6 +420,7 @@ Metrics:
 | T8 | `/v1/plugins` response fields and observability | T3, T4 |
 | T9 | Browser verification: how `'self'` matches under the CSP `sandbox` directive and cookie behavior for opaque-origin requests, on Chromium, Firefox, and Safari | T7 |
 | T10 | MCP tools: generation, annotations, adding and removing on hot reload with notifications | T3, T4 |
+| T11 | Data upgrades: running `upgrade` at host process startup, the plugin-identity context, handling `upgrade_failed`, bindings waiting for readiness | T3, T5 |
 
 ---
 
@@ -427,3 +450,6 @@ specify, to be confirmed one by one in review. The host process model and commun
 | E7 | MCP tools reuse the existing internal HTTP bridge, with authorization done by the HTTP route itself (§5.5) | Consistent with built-in tools, with no second authorization path | Adopted |
 | E8 | After a plugin page navigates or reloads, the hosting page shows "Reopen the plugin page" and resumes forwarding once the iframe is rebuilt (§7.3) | After navigation the plugin page cannot be told apart from an external page | Adopted |
 | E9 | Static files use `<version digest>:<relative path>` as the ETag with `no-cache` (§7.2) | Browsers fetch new files right after a version switch | Adopted |
+| E10 | `upgrade` runs in the new host process before `create`, not in a separate child process (§4.7) | The host process has to start before the new version is used anyway, so it reuses that runtime and its resources; a failed run equals a failed host start and follows the existing keep-the-old-version path | To confirm |
+| E11 | During `upgrade`, `reads` and `writer` act as the plugin itself, with no caller-related capabilities (§4.7) | An upgrade has no requesting caller; this matches the Worker permission model | To confirm |
+| E12 | A host process restarted after a crash runs `upgrade` again (§4.7) | Matches "called on every load and safe to repeat", with no need to record whether this process already upgraded | To confirm |
