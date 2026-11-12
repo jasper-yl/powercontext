@@ -2060,9 +2060,9 @@ async def restore_artifact(
 async def get_capabilities(request: Request) -> Capabilities:
     capability_provider: CapabilityProvider | None = request.app.state.capability_provider
     value = capability_provider() if capability_provider is not None else request.app.state.capabilities
-    from powercontext.builtin.plugins.families import plugin_families
-
-    added = sorted(plugin_families() - set(value.artifact_families))
+    # Only the families this Server's plugins provide; the process-wide family registry may hold others.
+    manager: PluginManager | None = request.app.state.plugin_manager
+    added = [] if manager is None else sorted(manager.families() - set(value.artifact_families))
     if added:
         value = value.model_copy(update={"artifact_families": [*value.artifact_families, *added]})
     declaration_provider: Callable[[], Awaitable[list[dict[str, Any]]]] | None = (

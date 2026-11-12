@@ -406,6 +406,15 @@ class PluginManager:
                 )
         return PluginScopePage(items=items, next_cursor=rows[limit - 1]["scope_id"] if len(rows) > limit else None)
 
+    def families(self) -> frozenset[str]:
+        """The families of the plugins this manager loaded."""
+
+        return frozenset(
+            plugin.manifest.spec.family
+            for plugin in self.plugins.values()
+            if plugin.error is None and plugin.manifest is not None
+        )
+
     def plugin_for_family(self, family: str) -> PluginManifest | None:
         for plugin in self.plugins.values():
             if plugin.error is None and plugin.manifest is not None and plugin.manifest.spec.family == family:
