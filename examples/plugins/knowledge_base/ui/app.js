@@ -22,7 +22,8 @@ limitations under the License.
   const TEXT = {
     zh: {
       knowledge_bases: "知识库", new: "新建", name: "名称", description: "描述", cancel: "取消", create: "创建",
-      save: "保存", edit: "编辑", delete: "删除", confirm_delete: "确认删除", no_knowledge_bases: "还没有知识库。",
+      save: "保存", edit: "编辑", delete: "删除", confirm: "确认", confirm_delete_kb: "确定删除这个知识库？",
+      confirm_delete_document: "确定删除？", no_knowledge_bases: "还没有知识库。",
       welcome_title: "选择或新建一个知识库", welcome_text: "每个知识库独立保存文档、切块和检索索引。批量上传文档后，统一选择解析方式再处理。",
       documents: "文档", search_and_ask: "检索与问答", upload_title: "拖拽文件到这里，或点击选择文件",
       upload_hint: "支持 {formats}，单个文件不超过 {size}", document: "文档", status: "状态",
@@ -47,7 +48,8 @@ limitations under the License.
     },
     en: {
       knowledge_bases: "Knowledge bases", new: "New", name: "Name", description: "Description", cancel: "Cancel",
-      create: "Create", save: "Save", edit: "Edit", delete: "Delete", confirm_delete: "Confirm delete",
+      create: "Create", save: "Save", edit: "Edit", delete: "Delete", confirm: "Confirm",
+      confirm_delete_kb: "Delete this knowledge base?", confirm_delete_document: "Delete?",
       no_knowledge_bases: "No knowledge bases yet.", welcome_title: "Select or create a knowledge base",
       welcome_text: "Each knowledge base keeps its own documents, chunks, and search index. Upload documents in bulk, then choose how to parse them.",
       documents: "Documents", search_and_ask: "Search & ask", upload_title: "Drop files here, or click to choose",
@@ -138,22 +140,20 @@ limitations under the License.
   const bytes = value => value == null ? "–"
     : value < 1024 ? `${value} B` : value < 1048576 ? `${(value / 1024).toFixed(1)} KB` : `${(value / 1048576).toFixed(1)} MB`;
 
-  // Confirm destructive actions inline; sandboxed pages have no dialogs.
-  function confirmButton(button, action) {
-    let armed = false;
-    let timer;
-    const label = button.textContent;
-    button.addEventListener("click", async () => {
-      if (!armed) {
-        armed = true;
-        button.textContent = t.confirm_delete;
-        button.classList.add("confirming");
-        timer = setTimeout(() => { armed = false; button.textContent = label; button.classList.remove("confirming"); }, 4000);
-        return;
-      }
-      clearTimeout(timer);
-      button.disabled = true;
-      try { await action(); } finally { button.disabled = false; armed = false; button.textContent = label; button.classList.remove("confirming"); }
+  // Confirm destructive actions in place: the sandboxed page cannot open browser dialogs,
+  // so the button turns into a question with explicit confirm and cancel buttons.
+  function confirmInline(button, question, action) {
+    button.addEventListener("click", () => {
+      const yes = element("button", { type: "button", class: "button small danger-solid" }, t.confirm);
+      const no = element("button", { type: "button", class: "button small" }, t.cancel);
+      const box = element("span", { class: "confirm" }, element("span", {}, question), yes, no);
+      button.replaceWith(box);
+      no.addEventListener("click", () => box.replaceWith(button));
+      yes.addEventListener("click", async () => {
+        yes.disabled = no.disabled = true;
+        try { await action(); } finally { if (box.isConnected) box.replaceWith(button); }
+      });
+      yes.focus();
     });
   }
 
@@ -281,7 +281,7 @@ limitations under the License.
     await loadBases(state.selected);
   });
 
-  confirmButton($("#delete-kb"), async () => {
+  confirmInline($("#delete-kb"), t.confirm_delete_kb, async () => {
     await call("DELETE", `/knowledge-bases/${encodeURIComponent(state.selected)}`);
     toast(t.deleted);
     await loadBases(null);
@@ -331,11 +331,14 @@ limitations under the License.
       download.addEventListener("click", () => downloadDocument(item));
       const waiting = item.status === "pending_config";
       const remove = element("button", { type: "button", class: "button link danger" }, waiting ? t.withdraw : t.delete);
-      confirmButton(remove, async () => {
+      const removeDocument = async () => {
         await call("DELETE", `/knowledge-bases/${encodeURIComponent(state.selected)}/documents/${encodeURIComponent(item.id)}`);
         toast(waiting ? t.withdrawn : t.deleted);
         await loadDocuments();
-      });
+      };
+      // Withdrawing an upload that never reached processing needs no confirmation; re-upload undoes it.
+      if (waiting) remove.addEventListener("click", removeDocument);
+      else confirmInline(remove, t.confirm_delete_document, removeDocument);
       return element("tr", {},
         element("td", { class: "name", title: item.error || "" }, item.name,
           item.edited ? element("span", { class: "badge plain edited" }, t.edited) : null,
