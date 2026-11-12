@@ -63,6 +63,7 @@ limitations under the License.
         <form class="card edit-kb" id="edit-kb-form" hidden>
           <label><span data-i18n="name"></span><input name="name" required maxlength="256" autocomplete="off"></label>
           <label><span data-i18n="description"></span><textarea name="description" rows="2" maxlength="2000"></textarea></label>
+          <label><span data-i18n="default_parser"></span><select name="default_parser" id="default-parser"></select></label>
           <div class="row end">
             <button type="button" class="button" data-cancel data-i18n="cancel"></button>
             <button type="submit" class="button primary" data-i18n="save"></button>
@@ -76,10 +77,18 @@ limitations under the License.
 
         <div class="panel" data-panel="documents">
           <label class="dropzone" id="dropzone">
-            <input type="file" id="file-input" accept=".md,.markdown,.txt,text/markdown,text/plain" multiple>
+            <input type="file" id="file-input" multiple>
             <strong data-i18n="upload_title"></strong>
             <span class="muted" id="upload-hint"></span>
           </label>
+          <form class="card pending" id="pending" hidden>
+            <strong id="pending-title"></strong>
+            <div class="parser-picker" id="pending-parser"></div>
+            <div class="row between">
+              <label class="inline check"><input type="checkbox" name="make_default" checked><span data-i18n="make_default"></span></label>
+              <button type="submit" class="button primary" data-i18n="start_processing"></button>
+            </div>
+          </form>
           <div class="table-wrap">
             <table class="documents">
               <thead><tr>
@@ -118,6 +127,27 @@ limitations under the License.
         </div>
       </section>
     </main>
+  </div>
+  <div class="overlay" id="chunk-panel" hidden>
+    <section class="sheet" role="dialog" aria-modal="true" aria-labelledby="chunk-title">
+      <header class="sheet-head">
+        <div>
+          <h2 id="chunk-title"></h2>
+          <p class="muted" id="chunk-meta"></p>
+        </div>
+        <button type="button" class="button" id="chunk-close" data-i18n="close"></button>
+      </header>
+      <details class="card reparse">
+        <summary data-i18n="reparse_title"></summary>
+        <div class="parser-picker" id="chunk-parser"></div>
+        <div class="row end"><button type="button" class="button" id="chunk-reparse" data-i18n="reparse"></button></div>
+      </details>
+      <ol class="chunk-list" id="chunk-list"></ol>
+      <footer class="sheet-foot row between">
+        <button type="button" class="button" id="chunk-restore" data-i18n="restore_previous"></button>
+        <button type="button" class="button primary" id="chunk-save" data-i18n="save_chunks"></button>
+      </footer>
+    </section>
   </div>
   <div class="toast" id="toast" role="status" hidden></div>
 </body>

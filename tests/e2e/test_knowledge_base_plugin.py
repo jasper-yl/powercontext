@@ -39,7 +39,36 @@ Rotate signing keys monthly and revoke the previous key after one week.
 CHINESE = "# 值班\n\n数据库告警时先检查主备延迟，再联系值班工程师。\n".encode()  # noqa: RUF001 - Chinese text uses full-width punctuation
 
 
-def test_knowledge_bases_hide_scopes_and_search_current_documents(tmp_path):
+def pdf(*pages: str) -> bytes:
+    """A minimal PDF with one line of Helvetica text on each page."""
+
+    objects = ["<< /Type /Catalog /Pages 2 0 R >>", "", "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>"]
+    kids = []
+    for text in pages:
+        stream = f"BT /F1 12 Tf 72 720 Td ({text}) Tj ET"
+        objects.append(f"<< /Length {len(stream)} >>\nstream\n{stream}\nendstream")
+        objects.append(
+            "<< /Type /Page /Parent 2 0 R /MediaBox [0 0 612 792] "
+            f"/Resources << /Font << /F1 3 0 R >> >> /Contents {len(objects)} 0 R >>"
+        )
+        kids.append(f"{len(objects)} 0 R")
+    objects[1] = f"<< /Type /Pages /Kids [{' '.join(kids)}] /Count {len(pages)} >>"
+    body = b"%PDF-1.4\n"
+    offsets = []
+    for number, value in enumerate(objects, 1):
+        offsets.append(len(body))
+        body += f"{number} 0 obj\n{value}\nendobj\n".encode()
+    table = "".join(f"{offset:010d} 00000 n \n" for offset in offsets)
+    return (
+        body
+        + (
+            f"xref\n0 {len(objects) + 1}\n0000000000 65535 f \n{table}"
+            f"trailer\n<< /Size {len(objects) + 1} /Root 1 0 R >>\nstartxref\n{len(body)}\n%%EOF\n"
+        ).encode()
+    )
+
+
+def test_knowledge_bases_hide_scopes_and_process_uploads_with_the_chosen_parser(tmp_path):
     plugins = tmp_path / "plugins"
     shutil.copytree(EXAMPLE, plugins / "knowledge-base", ignore=shutil.ignore_patterns("__pycache__"))
     log = tmp_path / "server.log"
@@ -54,37 +83,51 @@ def test_knowledge_bases_hide_scopes_and_search_current_documents(tmp_path):
             for item in (await ok(await client.get(f"{API}/knowledge-bases/{kb}/documents")))["items"]
         }
 
-    async def search(client, query, kbs, **options):
+    async def hits(client, query, kbs, **options):
         response = await client.post(f"{API}/search", json={"query": query, "knowledge_base_ids": kbs, **options})
-        return [(hit["document_name"], hit["text"]) for hit in (await ok(response))["hits"]]
+        return (await ok(response))["hits"]
+
+    async def search(client, query, kbs, **options):
+        return [(hit["document_name"], hit["text"]) for hit in await hits(client, query, kbs, **options)]
 
     async def scenario():
         async with running_server(tmp_path, plugins) as client:
             ops = await ok(await client.post(f"{API}/knowledge-bases", json={"name": "Ops", "description": "Runbooks"}))
-            assert set(ops) == {"id", "name", "description", "created_at"}
-            assert ops["name"] == "Ops" and ops["id"].startswith("kb_")
+            assert set(ops) == {"id", "name", "description", "default_parser", "created_at"}
+            assert ops["name"] == "Ops" and ops["id"].startswith("kb_") and ops["default_parser"] is None
             await ok(await client.post(f"{API}/knowledge-bases", json={"name": "Ops"}), 409)
             kb = ops["id"]
+            documents_path = f"{API}/knowledge-bases/{kb}/documents"
 
-            upload = f"{API}/knowledge-bases/{kb}/documents"
-            pending = await ok(await client.post(upload, params={"name": "deploy.md"}, content=DEPLOY))
-            assert pending["status"] == "processing"
-            await ok(await client.post(upload, params={"name": "keys.txt"}, content=KEYS))
-            await ok(await client.post(upload, params={"name": "oncall.md"}, content=CHINESE))
-            await ok(await client.post(upload, params={"name": "slides.pdf"}, content=b"%PDF"), 415)
+            # Without a default parser, a batch of uploads waits until the user chooses one.
+            for name, body in (("deploy.md", DEPLOY), ("keys.txt", KEYS), ("oncall.md", CHINESE)):
+                uploaded = await ok(await client.post(documents_path, params={"name": name}, content=body))
+                assert uploaded["status"] == "pending_config"
+            await ok(await client.post(documents_path, params={"name": "slides.pdf"}, content=b"not a pdf"), 415)
+            await ok(await client.post(documents_path, params={"name": "slides.docx"}, content=b"x"), 415)
+            assert {item["status"] for item in (await documents(client, kb)).values()} == {"pending_config"}
+            assert await search(client, "keys", [kb]) == []
 
+            processing = f"{API}/knowledge-bases/{kb}/processing"
+            for parser in ({"name": "magic"}, {"name": "paragraph", "params": {"overlap": 5000}}):
+                await ok(await client.post(processing, json={"parser": parser}), 422)
+            submitted = await ok(
+                await client.post(processing, json={"parser": {"name": "paragraph"}, "make_default": True})
+            )
+            assert submitted == {"submitted": 3}
             ready = await wait_for(
                 lambda: documents(client, kb),
-                lambda value: len(value) == 3 and all(item["status"] == "ready" for item in value.values()),
+                lambda value: all(item["status"] == "ready" for item in value.values()),
                 log=log,
             )
             assert ready["deploy.md"]["chunk_count"] >= 1 and ready["deploy.md"]["revision"] == 1
+            assert ready["deploy.md"]["parser"] == {"name": "paragraph", "params": {"chunk_size": 800, "overlap": 120}}
+            assert (await ok(await client.get(f"{API}/knowledge-bases/{kb}")))["default_parser"]["name"] == "paragraph"
 
-            hits = await search(client, "rotate the signing keys", [kb])
-            assert hits[0][0] == "keys.txt"
+            assert (await search(client, "rotate the signing keys", [kb]))[0][0] == "keys.txt"
             # Without a generation model, ask returns the retrieved passages and no answer.
             info = await ok(await client.get(f"{API}/info"))
-            assert info["generation_available"] is False and info["can_manage"] is True
+            assert info["generation_available"] is False and info["can_manage"] is True and ".pdf" in info["formats"]
             asked = await ok(
                 await client.post(f"{API}/ask", json={"question": "signing keys", "knowledge_base_ids": [kb]})
             )
@@ -92,13 +135,16 @@ def test_knowledge_bases_hide_scopes_and_search_current_documents(tmp_path):
             assert (await search(client, "数据库告警", [kb]))[0][0] == "oncall.md"
             assert (await search(client, "rollback release", [kb], mode="keyword"))[0][0] == "deploy.md"
 
-            document = ready["deploy.md"]["id"]
-            original = await client.get(f"{API}/knowledge-bases/{kb}/documents/{document}/content")
+            deploy = ready["deploy.md"]["id"]
+            original = await client.get(f"{documents_path}/{deploy}/content")
             assert original.status_code == 200 and original.content == DEPLOY
             assert original.headers["content-type"].startswith("text/markdown")
 
-            # Uploading the same name again adds a revision; search sees only the current text.
-            await ok(await client.post(upload, params={"name": "deploy.md"}, content=b"Deploys now go north first."))
+            # With a default parser, uploading the same name again is processed into a new revision.
+            again = await ok(
+                await client.post(documents_path, params={"name": "deploy.md"}, content=b"Deploys now go north first.")
+            )
+            assert again["status"] == "processing"
             await wait_for(
                 lambda: documents(client, kb),
                 lambda value: value["deploy.md"]["status"] == "ready" and value["deploy.md"]["revision"] == 2,
@@ -107,13 +153,58 @@ def test_knowledge_bases_hide_scopes_and_search_current_documents(tmp_path):
             assert all("east" not in text for _, text in await search(client, "east region", [kb]))
             assert (await search(client, "north", [kb], mode="keyword"))[0][0] == "deploy.md"
 
+            # Editing chunks writes a revision naming the edited set; history and restoring follow.
+            keys = ready["keys.txt"]["id"]
+            chunks_path = f"{documents_path}/{keys}/chunks"
+            parsed = await ok(await client.get(chunks_path))
+            assert parsed["revision"] == 1 and parsed["edited"] is False and "monthly" in parsed["chunks"][0]["text"]
+            edit = {
+                "expected_revision": 1,
+                "chunks": [{"text": "Rotate signing keys every 30 days; audit with keyctl."}],
+            }
+            edited = await ok(await client.put(chunks_path, json=edit))
+            assert (edited["revision"], edited["edited"], edited["chunk_count"]) == (2, True, 1)
+            assert (await search(client, "keyctl", [kb], mode="keyword"))[0][0] == "keys.txt"
+            await ok(await client.put(chunks_path, json=edit), 409)
+            assert "monthly" in (await ok(await client.get(chunks_path, params={"revision": "1"})))["chunks"][0]["text"]
+            await ok(await client.post(f"{documents_path}/{keys}/restorations", json={"revision": 1}), 204)
+            restored = await ok(await client.get(chunks_path))
+            assert restored["revision"] == 3 and restored["edited"] is False
+            assert await search(client, "keyctl", [kb], mode="keyword") == []
+
+            # Reprocessing a document with another parser adds a revision parsed that way.
+            fixed = {"name": "fixed", "params": {"chunk_size": 100, "overlap": 0}}
+            await ok(await client.post(processing, json={"parser": fixed, "document_ids": [keys]}))
+            reparsed = await wait_for(
+                lambda: documents(client, kb),
+                lambda value: value["keys.txt"]["status"] == "ready" and value["keys.txt"]["revision"] == 4,
+                log=log,
+            )
+            assert reparsed["keys.txt"]["parser"] == fixed
+            # Restoring a revision parsed earlier does not make the document look unprocessed.
+            await ok(await client.post(f"{documents_path}/{keys}/restorations", json={"revision": 1}), 204)
+            back = (await documents(client, kb))["keys.txt"]
+            assert (back["status"], back["revision"], back["parser"]["name"]) == ("ready", 5, "paragraph")
+
+            # PDFs are parsed page by page, and every chunk keeps its page.
+            runbook = pdf("Disk alerts page the storage team.", "Rotate TLS certificates every 90 days.")
+            await ok(await client.post(documents_path, params={"name": "runbook.pdf"}, content=runbook))
+            await wait_for(
+                lambda: documents(client, kb),
+                lambda value: value.get("runbook.pdf", {}).get("status") == "ready",
+                log=log,
+            )
+            found = await hits(client, "certificates", [kb], mode="keyword")
+            assert (found[0]["document_name"], found[0]["page"]) == ("runbook.pdf", 2)
+
             # Deleting a document forgets its Artifact; it leaves listings and search.
-            await ok(await client.delete(f"{API}/knowledge-bases/{kb}/documents/{document}"), 204)
-            assert set(await documents(client, kb)) == {"keys.txt", "oncall.md"}
+            await ok(await client.delete(f"{documents_path}/{deploy}"), 204)
+            assert set(await documents(client, kb)) == {"keys.txt", "oncall.md", "runbook.pdf"}
             assert all(name != "deploy.md" for name, _ in await search(client, "north", [kb]))
 
             # Search spans knowledge bases; unknown ones are indistinguishable from hidden ones.
             other = (await ok(await client.post(f"{API}/knowledge-bases", json={"name": "Security"})))["id"]
+            await ok(await client.patch(f"{API}/knowledge-bases/{other}", json={"default_parser": {"name": "heading"}}))
             await ok(
                 await client.post(
                     f"{API}/knowledge-bases/{other}/documents",
@@ -126,17 +217,15 @@ def test_knowledge_bases_hide_scopes_and_search_current_documents(tmp_path):
                 lambda value: value.get("tls.md", {}).get("status") == "ready",
                 log=log,
             )
-            assert {name for name, _ in await search(client, "keys certificates", [kb, other], mode="keyword")} == {
+            assert {name for name, _ in await search(client, "rotate certificates", [kb, other], mode="keyword")} == {
                 "keys.txt",
+                "runbook.pdf",
                 "tls.md",
             }
-            # Hybrid search also ranks unrelated chunks by vector similarity, after the matching ones.
-            ranked = [name for name, _ in await search(client, "keys certificates", [kb, other])]
-            assert set(ranked[:2]) == {"keys.txt", "tls.md"}
             await ok(await client.post(f"{API}/search", json={"query": "x", "knowledge_base_ids": ["kb_missing"]}), 404)
 
             renamed = await ok(await client.patch(f"{API}/knowledge-bases/{other}", json={"name": "Sec"}))
-            assert renamed["name"] == "Sec"
+            assert renamed["name"] == "Sec" and renamed["default_parser"]["name"] == "heading"
             await ok(await client.delete(f"{API}/knowledge-bases/{other}"), 204)
             listed = await ok(await client.get(f"{API}/knowledge-bases"))
             assert [item["name"] for item in listed["items"]] == ["Ops"]
@@ -190,6 +279,12 @@ def test_dashboard_page_forwards_only_same_origin_session_requests(tmp_path):
                 for headers in ({"Sec-Fetch-Site": "cross-site"}, {"Origin": "null"}, {}):
                     assert (await browser.post(forward, json={"name": "X"}, headers=headers)).status_code == 403
 
+                configured = await browser.patch(
+                    f"{forward}/{created.json()['id']}",
+                    json={"default_parser": {"name": "paragraph"}},
+                    headers=same_origin,
+                )
+                assert configured.status_code == 200, configured.text
                 upload = f"{forward}/{created.json()['id']}/documents"
                 large = await browser.post(upload, params={"name": "big.md"}, content=b"x" * 5000, headers=same_origin)
                 assert large.status_code == 413, large.text

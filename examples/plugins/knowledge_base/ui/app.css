@@ -218,3 +218,38 @@ td.actions { text-align: right; white-space: nowrap; }
   .sidebar { border-right: 0; border-bottom: 1px solid var(--border); }
   .main { padding: 16px; }
 }
+
+.pending { border-color: var(--warn); }
+.badge.pending_config { color: var(--warn); }
+.check { color: var(--text); }
+.check input { width: auto; }
+
+.parser-picker { display: grid; gap: 8px; }
+.parser-picker .params { display: flex; flex-wrap: wrap; gap: 8px 16px; }
+.parser-picker .params label { display: flex; align-items: center; gap: 6px; }
+.parser-picker .params input { width: 90px; }
+.parser-picker .description { font-size: 13px; }
+
+.overlay { position: fixed; inset: 0; background: rgb(0 0 0 / 0.35); display: flex; justify-content: flex-end; z-index: 10; }
+.sheet {
+  width: min(760px, 100%);
+  height: 100%;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 20px;
+  background: var(--bg);
+  box-shadow: -4px 0 24px rgb(0 0 0 / 0.2);
+}
+.sheet-head { display: flex; justify-content: space-between; gap: 12px; align-items: flex-start; }
+.sheet-foot { padding-top: 8px; border-top: 1px solid var(--border); }
+.reparse summary { cursor: pointer; color: var(--accent); }
+.reparse[open] { display: grid; gap: 10px; }
+.chunk-list { list-style: none; margin: 0; padding: 0; overflow-y: auto; flex: 1; display: grid; gap: 8px; align-content: start; }
+.chunk-list li { display: grid; gap: 6px; }
+.chunk-list .chunk-head { display: flex; align-items: center; gap: 8px; font-size: 12px; color: var(--muted); }
+.chunk-list .chunk-head .spacer { flex: 1; }
+.chunk-list textarea { min-height: 90px; font-size: 13px; line-height: 1.55; }
+.hits .page { color: var(--muted); }
+.small { font-size: 12px; }
+.badge.edited { margin-left: 6px; }

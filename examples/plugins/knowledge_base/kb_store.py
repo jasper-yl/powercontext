@@ -14,13 +14,17 @@
 
 """The knowledge base plugin's own storage, in the dedicated area core allocates.
 
-Nothing here is in core's transactions. Originals and chunks are immutable records
-keyed by content digest, so a rolled-back or retried write only leaves records no
-Artifact references; core's Artifacts decide what is current.
+Nothing here is in core's transactions. Originals, chunk sets, and vectors are immutable
+records keyed by content digest, so a rolled-back or retried write only leaves records no
+Artifact references; the ``document`` Artifacts in core decide what is current. A chunk set
+is one exact list of chunks; parsing and user edits both produce chunk sets, and a document
+revision names the set it uses. Vectors are a derived index of a set for one embedding
+profile and can be rebuilt at any time.
 """
 
 from __future__ import annotations
 
+import hashlib
 import json
 from collections.abc import Sequence
 from contextlib import suppress
@@ -53,6 +57,8 @@ KNOWLEDGE_BASES = Table(
     Column("scope_id", String(256), nullable=False, unique=True),
     Column("name", String(256), nullable=False),
     Column("description", Text, nullable=False, default=""),
+    # The parser new uploads use; None keeps uploads waiting until the user chooses one.
+    Column("default_parser", JSON, nullable=True),
     Column("created_by", String(512), nullable=False),
     Column("created_at", DateTime(timezone=True), nullable=False),
     Column("deleted_at", DateTime(timezone=True), nullable=True),
@@ -67,27 +73,58 @@ ORIGINALS = Table(
     Column("content", LargeBinary, nullable=False),
 )
 
-UPLOADS = Table(
-    "uploads",
+# Every upload and every request to (re)process a document. A submission without a source_id
+# waits for the user to choose a parser; submitting it to core records the Source's name, and
+# generation records when it handled the submission.
+SUBMISSIONS = Table(
+    "submissions",
     METADATA,
     Column("scope_id", String(256), primary_key=True),
-    Column("source_id", String(128), primary_key=True),
-    Column("document_id", String(64), nullable=False),
+    Column("submission_id", String(64), primary_key=True),
+    Column("document_id", String(64), nullable=False, index=True),
     Column("name", String(512), nullable=False),
     Column("sha256", String(64), nullable=False),
-    Column("uploaded_at", DateTime(timezone=True), nullable=False),
+    Column("media_type", String(64), nullable=False),
+    Column("size", Integer, nullable=False),
+    Column("uploaded_by", String(512), nullable=False),
+    Column("parser", JSON, nullable=True),
+    Column("source_id", String(128), nullable=True),
+    Column("processed_at", DateTime(timezone=True), nullable=True),
+    Column("created_at", DateTime(timezone=True), nullable=False),
+)
+
+PARSED = Table(
+    "parsed",
+    METADATA,
+    Column("scope_id", String(256), primary_key=True),
+    Column("sha256", String(64), primary_key=True),
+    Column("parse_profile", String(128), primary_key=True),
+    Column("set_id", String(64), nullable=False),
 )
 
 CHUNKS = Table(
     "chunks",
     METADATA,
     Column("scope_id", String(256), primary_key=True),
-    Column("sha256", String(64), primary_key=True),
-    Column("profile", String(128), primary_key=True),
+    Column("set_id", String(64), primary_key=True),
     Column("chunk_index", Integer, primary_key=True),
     Column("text", Text, nullable=False),
+    Column("page", Integer, nullable=True),
+)
+
+VECTORS = Table(
+    "vectors",
+    METADATA,
+    Column("scope_id", String(256), primary_key=True),
+    Column("set_id", String(64), primary_key=True),
+    Column("embedding_profile", String(128), primary_key=True),
+    Column("chunk_index", Integer, primary_key=True),
     Column("vector", JSON, nullable=False),
 )
+
+
+def chunk_set_id(chunks: Sequence[tuple[str, int | None]]) -> str:
+    return hashlib.sha256(json.dumps([list(item) for item in chunks], ensure_ascii=False).encode()).hexdigest()
 
 
 class KnowledgeBaseStore:
@@ -97,6 +134,10 @@ class KnowledgeBaseStore:
     async def prepare(self) -> None:
         async with self.engine.begin() as connection:
             await connection.run_sync(METADATA.create_all)
+
+    async def _rows(self, statement: Any) -> list[dict[str, Any]]:
+        async with self.engine.connect() as connection:
+            return [dict(row) for row in (await connection.execute(statement)).mappings().all()]
 
     # Knowledge bases
 
@@ -117,6 +158,7 @@ class KnowledgeBaseStore:
                 "scope_id": scope_id,
                 "name": name,
                 "description": description,
+                "default_parser": None,
                 "created_by": created_by,
                 "created_at": datetime.now(UTC),
                 "deleted_at": None,
@@ -125,37 +167,19 @@ class KnowledgeBaseStore:
         return row
 
     async def knowledge_base(self, kb_id: str) -> dict[str, Any] | None:
-        async with self.engine.connect() as connection:
-            row = (
-                (
-                    await connection.execute(
-                        select(KNOWLEDGE_BASES).where(
-                            KNOWLEDGE_BASES.c.kb_id == kb_id, KNOWLEDGE_BASES.c.deleted_at.is_(None)
-                        )
-                    )
-                )
-                .mappings()
-                .one_or_none()
-            )
-        return None if row is None else dict(row)
+        rows = await self._rows(
+            select(KNOWLEDGE_BASES).where(KNOWLEDGE_BASES.c.kb_id == kb_id, KNOWLEDGE_BASES.c.deleted_at.is_(None))
+        )
+        return rows[0] if rows else None
 
     async def knowledge_bases(self) -> list[dict[str, Any]]:
-        async with self.engine.connect() as connection:
-            rows = (
-                (
-                    await connection.execute(
-                        select(KNOWLEDGE_BASES)
-                        .where(KNOWLEDGE_BASES.c.deleted_at.is_(None))
-                        .order_by(KNOWLEDGE_BASES.c.created_at, KNOWLEDGE_BASES.c.kb_id)
-                    )
-                )
-                .mappings()
-                .all()
-            )
-        return [dict(row) for row in rows]
+        return await self._rows(
+            select(KNOWLEDGE_BASES)
+            .where(KNOWLEDGE_BASES.c.deleted_at.is_(None))
+            .order_by(KNOWLEDGE_BASES.c.created_at, KNOWLEDGE_BASES.c.kb_id)
+        )
 
-    async def rename(self, kb_id: str, *, name: str | None, description: str | None) -> None:
-        values = {key: value for key, value in (("name", name), ("description", description)) if value is not None}
+    async def update_knowledge_base(self, kb_id: str, **values: Any) -> None:
         if values:
             async with self.engine.begin() as connection:
                 await connection.execute(
@@ -165,12 +189,9 @@ class KnowledgeBaseStore:
     async def mark_deleted(self, kb_id: str) -> None:
         """Hide the knowledge base; its Scope, Sources, and Artifacts stay in core."""
 
-        async with self.engine.begin() as connection:
-            await connection.execute(
-                update(KNOWLEDGE_BASES).where(KNOWLEDGE_BASES.c.kb_id == kb_id).values(deleted_at=datetime.now(UTC))
-            )
+        await self.update_knowledge_base(kb_id, deleted_at=datetime.now(UTC))
 
-    # Originals and uploads
+    # Originals and submissions
 
     async def save_original(self, scope_id: str, sha256: str, media_type: str, content: bytes) -> None:
         async with self.engine.begin() as connection:
@@ -191,80 +212,118 @@ class KnowledgeBaseStore:
             ).one_or_none()
         return None if row is None else (bytes(row.content), str(row.media_type))
 
-    async def record_upload(self, scope_id: str, source_id: str, document_id: str, name: str, sha256: str) -> None:
+    async def add_submission(self, scope_id: str, **values: Any) -> dict[str, Any]:
+        row = {
+            "scope_id": scope_id,
+            "created_at": datetime.now(UTC),
+            "source_id": None,
+            "parser": None,
+            "processed_at": None,
+            **values,
+        }
         async with self.engine.begin() as connection:
-            with suppress(IntegrityError):
-                await connection.execute(
-                    insert(UPLOADS).values(
-                        scope_id=scope_id,
-                        source_id=source_id,
-                        document_id=document_id,
-                        name=name,
-                        sha256=sha256,
-                        uploaded_at=datetime.now(UTC),
-                    )
-                )
+            await connection.execute(insert(SUBMISSIONS).values(**row))
+        return row
 
-    async def uploads(self, scope_id: str) -> list[dict[str, Any]]:
-        async with self.engine.connect() as connection:
-            rows = (
-                (
-                    await connection.execute(
-                        select(UPLOADS).where(UPLOADS.c.scope_id == scope_id).order_by(UPLOADS.c.uploaded_at)
-                    )
-                )
-                .mappings()
-                .all()
+    async def mark_submitted(self, scope_id: str, submission_id: str, source_id: str, parser: dict[str, Any]) -> None:
+        async with self.engine.begin() as connection:
+            await connection.execute(
+                update(SUBMISSIONS)
+                .where(SUBMISSIONS.c.scope_id == scope_id, SUBMISSIONS.c.submission_id == submission_id)
+                .values(source_id=source_id, parser=parser)
             )
-        return [dict(row) for row in rows]
 
-    # Chunks
+    async def mark_processed(self, scope_id: str, submission_ids: Sequence[str]) -> None:
+        if submission_ids:
+            async with self.engine.begin() as connection:
+                await connection.execute(
+                    update(SUBMISSIONS)
+                    .where(SUBMISSIONS.c.scope_id == scope_id, SUBMISSIONS.c.submission_id.in_(tuple(submission_ids)))
+                    .values(processed_at=datetime.now(UTC))
+                )
 
-    async def save_chunks(
-        self, scope_id: str, sha256: str, profile: str, chunks: Sequence[str], vectors: Sequence[Sequence[float]]
-    ) -> None:
+    async def latest_submissions(self, scope_id: str) -> dict[str, dict[str, Any]]:
+        """The newest submission of every document in the knowledge base."""
+
+        rows = await self._rows(
+            select(SUBMISSIONS).where(SUBMISSIONS.c.scope_id == scope_id).order_by(SUBMISSIONS.c.created_at)
+        )
+        return {row["document_id"]: row for row in rows}
+
+    # Chunk sets and vectors
+
+    async def parsed_set(self, scope_id: str, sha256: str, parse_profile: str) -> str | None:
+        rows = await self._rows(
+            select(PARSED.c.set_id).where(
+                PARSED.c.scope_id == scope_id, PARSED.c.sha256 == sha256, PARSED.c.parse_profile == parse_profile
+            )
+        )
+        return rows[0]["set_id"] if rows else None
+
+    async def save_chunk_set(
+        self, scope_id: str, chunks: Sequence[tuple[str, int | None]], *, parsed_from: tuple[str, str] | None = None
+    ) -> str:
+        set_id = chunk_set_id(chunks)
         async with self.engine.begin() as connection:
             stored = (
-                (
-                    await connection.execute(
-                        select(CHUNKS.c.chunk_index).where(
-                            CHUNKS.c.scope_id == scope_id, CHUNKS.c.sha256 == sha256, CHUNKS.c.profile == profile
-                        )
-                    )
+                await connection.execute(
+                    select(CHUNKS.c.chunk_index)
+                    .where(CHUNKS.c.scope_id == scope_id, CHUNKS.c.set_id == set_id)
+                    .limit(1)
                 )
-                .scalars()
-                .all()
-            )
-            if len(stored) == len(chunks):
-                return
-            for index, (text, vector) in enumerate(zip(chunks, vectors, strict=True)):
-                if index not in stored:
-                    await connection.execute(
-                        insert(CHUNKS).values(
-                            scope_id=scope_id,
-                            sha256=sha256,
-                            profile=profile,
-                            chunk_index=index,
-                            text=text,
-                            vector=json.loads(json.dumps(list(vector))),
+            ).first()
+            if stored is None:
+                await connection.execute(
+                    insert(CHUNKS),
+                    [
+                        {"scope_id": scope_id, "set_id": set_id, "chunk_index": index, "text": text, "page": page}
+                        for index, (text, page) in enumerate(chunks)
+                    ],
+                )
+            if parsed_from is not None:
+                with suppress(IntegrityError):
+                    async with connection.begin_nested():
+                        await connection.execute(
+                            insert(PARSED).values(
+                                scope_id=scope_id, sha256=parsed_from[0], parse_profile=parsed_from[1], set_id=set_id
+                            )
                         )
-                    )
+        return set_id
 
-    async def chunks(self, scope_id: str, digests: Sequence[str], profile: str) -> list[dict[str, Any]]:
-        if not digests:
+    async def chunks(self, scope_id: str, set_ids: Sequence[str]) -> list[dict[str, Any]]:
+        if not set_ids:
             return []
-        async with self.engine.connect() as connection:
-            rows = (
-                (
-                    await connection.execute(
-                        select(CHUNKS).where(
-                            CHUNKS.c.scope_id == scope_id,
-                            CHUNKS.c.sha256.in_(tuple(digests)),
-                            CHUNKS.c.profile == profile,
-                        )
-                    )
-                )
-                .mappings()
-                .all()
+        return await self._rows(
+            select(CHUNKS)
+            .where(CHUNKS.c.scope_id == scope_id, CHUNKS.c.set_id.in_(tuple(set_ids)))
+            .order_by(CHUNKS.c.set_id, CHUNKS.c.chunk_index)
+        )
+
+    async def vectors(
+        self, scope_id: str, set_ids: Sequence[str], profile: str
+    ) -> dict[tuple[str, int], Sequence[float]]:
+        if not set_ids:
+            return {}
+        rows = await self._rows(
+            select(VECTORS).where(
+                VECTORS.c.scope_id == scope_id,
+                VECTORS.c.set_id.in_(tuple(set_ids)),
+                VECTORS.c.embedding_profile == profile,
             )
-        return [dict(row) for row in rows]
+        )
+        return {(row["set_id"], row["chunk_index"]): row["vector"] for row in rows}
+
+    async def save_vectors(self, scope_id: str, profile: str, vectors: dict[tuple[str, int], Sequence[float]]) -> None:
+        async with self.engine.begin() as connection:
+            for (set_id, index), vector in vectors.items():
+                with suppress(IntegrityError):
+                    async with connection.begin_nested():
+                        await connection.execute(
+                            insert(VECTORS).values(
+                                scope_id=scope_id,
+                                set_id=set_id,
+                                embedding_profile=profile,
+                                chunk_index=index,
+                                vector=[float(value) for value in vector],
+                            )
+                        )

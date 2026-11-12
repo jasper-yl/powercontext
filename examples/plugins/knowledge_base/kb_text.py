@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Text handling for the knowledge base plugin: decoding, chunking, embedding, and ranking."""
+"""Ranking for the knowledge base plugin: tokens, a fallback embedding, BM25, and rank fusion."""
 
 from __future__ import annotations
 
@@ -23,48 +23,9 @@ from collections import Counter
 from collections.abc import Sequence
 from itertools import pairwise
 
-MEDIA_TYPES = {".md": "text/markdown", ".markdown": "text/markdown", ".txt": "text/plain"}
-CHUNK_CHARACTERS = 800
-CHUNK_OVERLAP = 120
 HASH_DIMENSION = 256
 _WORD = re.compile(r"[a-z0-9]+")
 _CJK = re.compile(r"[㐀-鿿]")
-
-
-def media_type_for(name: str) -> str | None:
-    for suffix, media_type in MEDIA_TYPES.items():
-        if name.lower().endswith(suffix):
-            return media_type
-    return None
-
-
-def decode(content: bytes) -> str:
-    text = content.decode("utf-8")
-    return text.replace("\r\n", "\n").strip()
-
-
-def chunk(text: str) -> list[str]:
-    """Split on paragraphs, packing them into windows with a small overlap between windows."""
-
-    paragraphs = [part.strip() for part in re.split(r"\n\s*\n", text) if part.strip()]
-    chunks: list[str] = []
-    current = ""
-    for paragraph in paragraphs:
-        while len(paragraph) > CHUNK_CHARACTERS:
-            if current:
-                chunks.append(current)
-                current = ""
-            chunks.append(paragraph[:CHUNK_CHARACTERS])
-            paragraph = paragraph[CHUNK_CHARACTERS - CHUNK_OVERLAP :]
-        candidate = paragraph if not current else f"{current}\n\n{paragraph}"
-        if len(candidate) > CHUNK_CHARACTERS:
-            chunks.append(current)
-            current = f"{current[-CHUNK_OVERLAP:]}\n\n{paragraph}"
-        else:
-            current = candidate
-    if current:
-        chunks.append(current)
-    return chunks
 
 
 def tokens(text: str) -> list[str]:

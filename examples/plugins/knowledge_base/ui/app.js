@@ -23,10 +23,10 @@ limitations under the License.
     zh: {
       knowledge_bases: "知识库", new: "新建", name: "名称", description: "描述", cancel: "取消", create: "创建",
       save: "保存", edit: "编辑", delete: "删除", confirm_delete: "确认删除", no_knowledge_bases: "还没有知识库。",
-      welcome_title: "选择或新建一个知识库", welcome_text: "每个知识库独立保存文档、切片和检索索引。上传 Markdown 或纯文本文件后即可检索和问答。",
+      welcome_title: "选择或新建一个知识库", welcome_text: "每个知识库独立保存文档、切块和检索索引。批量上传文档后，统一选择解析方式再处理。",
       documents: "文档", search_and_ask: "检索与问答", upload_title: "拖拽文件到这里，或点击选择文件",
-      upload_hint: "支持 .md、.markdown、.txt，单个文件不超过 {size}", document: "文档", status: "状态",
-      chunks: "切片", revision: "版本", size: "大小", no_documents: "还没有文档。", download: "下载",
+      upload_hint: "支持 {formats}，单个文件不超过 {size}", document: "文档", status: "状态",
+      chunks: "切块", revision: "版本", size: "大小", no_documents: "还没有文档。", download: "下载",
       status_ready: "就绪", status_processing: "处理中", status_failed: "失败", question_placeholder: "输入问题或检索词…",
       search_in: "检索范围", mode: "检索方式", mode_hybrid: "混合", mode_keyword: "关键词", mode_vector: "向量",
       search: "检索", ask: "提问", answer: "回答", no_hits: "没有找到相关内容。",
@@ -34,15 +34,23 @@ limitations under the License.
       embedding_hash: "向量：内置哈希（未配置 embedding 模型）", generation_on: "生成模型：已配置", generation_off: "生成模型：未配置",
       uploaded: "已上传 {name}，正在处理", created: "已创建知识库 {name}", deleted: "已删除", saved: "已保存",
       forbidden: "没有权限执行该操作。创建和删除知识库需要 server.admin。", error: "操作失败：{message}",
-      too_large: "文件超过大小限制", unsupported: "只支持 .md、.markdown、.txt 文件", stopped: "页面已停止转发请求，请重新打开。",
+      too_large: "文件超过大小限制", unsupported: "不支持的文件类型", stopped: "页面已停止转发请求，请重新打开。",
+      status_pending_config: "待配置", pending_title: "{count} 个文档等待选择解析方式", default_parser: "默认解析方式",
+      parser_none: "不设默认：上传后等待配置", make_default: "同时设为该知识库的默认解析方式（之后的上传自动处理）",
+      start_processing: "开始处理", processing_started: "已提交 {count} 个文档", uploaded_pending: "已上传 {name}，等待选择解析方式",
+      view_chunks: "切块", close: "关闭", reparse_title: "换一种解析方式重新处理", reparse: "重新解析",
+      restore_previous: "恢复上一版本", save_chunks: "保存修改", add_chunk: "在下方插入", remove_chunk: "删除",
+      edited: "已人工编辑", page: "第 {page} 页", chunk_meta: "第 {revision} 版 · {parser} · {count} 个切块",
+      chunks_saved: "已保存为第 {revision} 版", restored: "已恢复到第 {revision} 版", reparse_started: "已提交重新解析",
+      empty_chunk: "切块不能为空", unsaved: "有未保存的修改",
     },
     en: {
       knowledge_bases: "Knowledge bases", new: "New", name: "Name", description: "Description", cancel: "Cancel",
       create: "Create", save: "Save", edit: "Edit", delete: "Delete", confirm_delete: "Confirm delete",
       no_knowledge_bases: "No knowledge bases yet.", welcome_title: "Select or create a knowledge base",
-      welcome_text: "Each knowledge base keeps its own documents, chunks, and search index. Upload Markdown or plain text files to search and ask questions.",
+      welcome_text: "Each knowledge base keeps its own documents, chunks, and search index. Upload documents in bulk, then choose how to parse them.",
       documents: "Documents", search_and_ask: "Search & ask", upload_title: "Drop files here, or click to choose",
-      upload_hint: ".md, .markdown, or .txt, up to {size} each", document: "Document", status: "Status",
+      upload_hint: "{formats}, up to {size} each", document: "Document", status: "Status",
       chunks: "Chunks", revision: "Revision", size: "Size", no_documents: "No documents yet.", download: "Download",
       status_ready: "Ready", status_processing: "Processing", status_failed: "Failed",
       question_placeholder: "Ask a question or enter search terms…", search_in: "Search in", mode: "Mode",
@@ -54,7 +62,17 @@ limitations under the License.
       uploaded: "Uploaded {name}; processing", created: "Created {name}", deleted: "Deleted", saved: "Saved",
       forbidden: "You are not allowed to do this. Creating and deleting knowledge bases needs server.admin.",
       error: "Failed: {message}", too_large: "The file exceeds the size limit",
-      unsupported: "Only .md, .markdown, and .txt files are supported", stopped: "Requests stopped; reopen the page.",
+      unsupported: "This file type is not supported", stopped: "Requests stopped; reopen the page.",
+      status_pending_config: "Needs parser", pending_title: "{count} documents are waiting for a parser",
+      default_parser: "Default parser", parser_none: "No default: uploads wait for a parser",
+      make_default: "Also make this the knowledge base's default (later uploads are processed automatically)",
+      start_processing: "Start processing", processing_started: "Submitted {count} documents",
+      uploaded_pending: "Uploaded {name}; choose a parser to process it", view_chunks: "Chunks", close: "Close",
+      reparse_title: "Reprocess with another parser", reparse: "Reprocess", restore_previous: "Restore previous revision",
+      save_chunks: "Save changes", add_chunk: "Insert below", remove_chunk: "Remove", edited: "Edited",
+      page: "page {page}", chunk_meta: "Revision {revision} · {parser} · {count} chunks",
+      chunks_saved: "Saved as revision {revision}", restored: "Restored revision {revision}",
+      reparse_started: "Reprocessing submitted", empty_chunk: "Chunks cannot be empty", unsaved: "You have unsaved changes",
     },
   };
 
@@ -66,7 +84,8 @@ limitations under the License.
 
   const $ = selector => document.querySelector(selector);
   const format = (text, values = {}) => text.replace(/\{(\w+)\}/g, (_, key) => values[key] ?? "");
-  const state = { info: null, bases: [], selected: null, targets: null, documents: [], poll: null };
+  const state = { info: null, parsers: [], bases: [], selected: null, targets: null, documents: [], poll: null, open: null };
+  const lang = context.language === "zh" ? "zh" : "en";
 
   for (const node of document.querySelectorAll("[data-i18n]")) node.textContent = t[node.dataset.i18n];
   for (const node of document.querySelectorAll("[data-i18n-placeholder]")) node.placeholder = t[node.dataset.i18nPlaceholder];
@@ -146,8 +165,38 @@ limitations under the License.
     );
     $("#new-kb").hidden = !state.info.can_manage;
     $("#delete-kb").hidden = !state.info.can_manage;
-    $("#upload-hint").textContent = format(t.upload_hint, { size: bytes(state.info.max_upload_bytes) });
+    $("#upload-hint").textContent = format(t.upload_hint, {
+      formats: state.info.formats.join(" "), size: bytes(state.info.max_upload_bytes),
+    });
+    $("#file-input").accept = state.info.formats.join(",");
+    state.parsers = (await call("GET", "/parsers")).json.items;
+    $("#default-parser").replaceChildren(
+      element("option", { value: "" }, t.parser_none),
+      ...state.parsers.map(parser => element("option", { value: parser.name }, parser.title[lang])),
+    );
   }
+
+  // A parser and its parameters; the plugin validates them and fills in defaults.
+  function parserPicker(container, choice) {
+    const select = element("select", {}, ...state.parsers.map(parser => element("option", { value: parser.name }, parser.title[lang])));
+    const description = element("p", { class: "muted description" });
+    const params = element("div", { class: "params" });
+    function render(values = {}) {
+      const parser = state.parsers.find(item => item.name === select.value);
+      description.textContent = parser.description[lang];
+      params.replaceChildren(...parser.parameters.map(item => element("label", {}, item.name,
+        element("input", { type: "number", name: item.name, min: item.minimum, max: item.maximum, value: values[item.name] ?? item.default }))));
+    }
+    select.value = choice?.name || state.parsers[0].name;
+    select.addEventListener("change", () => render());
+    render(choice?.params);
+    container.replaceChildren(select, description, params);
+    return () => ({
+      name: select.value,
+      params: Object.fromEntries([...params.querySelectorAll("input")].map(input => [input.name, Number(input.value)])),
+    });
+  }
+  const parserName = choice => state.parsers.find(item => item.name === choice?.name)?.title[lang] ?? choice?.name ?? "–";
 
   // Knowledge bases
 
@@ -205,6 +254,7 @@ limitations under the License.
     const base = current();
     form.name.value = base.name;
     form.description.value = base.description;
+    form.default_parser.value = base.default_parser?.name ?? "";
     form.hidden = false;
     form.name.focus();
   });
@@ -213,7 +263,11 @@ limitations under the License.
     event.preventDefault();
     const form = event.currentTarget;
     await call("PATCH", `/knowledge-bases/${encodeURIComponent(state.selected)}`, {
-      json: { name: form.name.value.trim(), description: form.description.value.trim() },
+      json: {
+        name: form.name.value.trim(),
+        description: form.description.value.trim(),
+        default_parser: form.default_parser.value ? { name: form.default_parser.value } : null,
+      },
     });
     form.hidden = true;
     toast(t.saved);
@@ -239,10 +293,34 @@ limitations under the License.
     if (state.documents.some(item => item.status === "processing")) state.poll = setTimeout(loadDocuments, 1500);
   }
 
+  let pendingParser = null;
+  function renderPending() {
+    const pending = state.documents.filter(item => item.status === "pending_config").length;
+    const form = $("#pending");
+    if (!pending) { form.hidden = true; pendingParser = null; return; }
+    $("#pending-title").textContent = format(t.pending_title, { count: pending });
+    if (!pendingParser) pendingParser = parserPicker($("#pending-parser"), current()?.default_parser);
+    form.hidden = false;
+  }
+
+  $("#pending").addEventListener("submit", async event => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const result = (await call("POST", `/knowledge-bases/${encodeURIComponent(state.selected)}/processing`, {
+      json: { parser: pendingParser(), make_default: form.make_default.checked },
+    })).json;
+    toast(format(t.processing_started, { count: result.submitted }));
+    pendingParser = null;
+    await loadBases(state.selected);
+  });
+
   function renderDocuments() {
+    renderPending();
     $("#documents-empty").hidden = state.documents.length > 0;
     $("#documents").replaceChildren(...state.documents.map(item => {
-      const download = element("button", { type: "button", class: "button link", disabled: item.status !== "ready" }, t.download);
+      const chunks = element("button", { type: "button", class: "button link", disabled: item.status !== "ready" }, t.view_chunks);
+      chunks.addEventListener("click", () => openChunks(item));
+      const download = element("button", { type: "button", class: "button link", disabled: !item.revision }, t.download);
       download.addEventListener("click", () => downloadDocument(item));
       const remove = element("button", { type: "button", class: "button link danger" }, t.delete);
       confirmButton(remove, async () => {
@@ -251,12 +329,14 @@ limitations under the License.
         await loadDocuments();
       });
       return element("tr", {},
-        element("td", { class: "name", title: item.error || "" }, item.name),
+        element("td", { class: "name", title: item.error || "" }, item.name,
+          item.edited ? element("span", { class: "badge plain edited" }, t.edited) : null,
+          item.error ? element("div", { class: "muted small" }, item.error) : null),
         element("td", {}, element("span", { class: `badge ${item.status}` }, t[`status_${item.status}`])),
         element("td", { class: "num" }, item.chunk_count ?? "–"),
         element("td", { class: "num" }, item.revision ?? "–"),
         element("td", { class: "num" }, bytes(item.size)),
-        element("td", { class: "actions" }, download, remove),
+        element("td", { class: "actions" }, chunks, download, remove),
       );
     }));
   }
@@ -275,13 +355,14 @@ limitations under the License.
     // Every file of one drop goes to the knowledge base that was open when it started.
     const base = state.selected;
     for (const file of files) {
-      if (!/\.(md|markdown|txt)$/i.test(file.name)) { toast(t.unsupported, true); continue; }
-      if (state.info && file.size > state.info.max_upload_bytes) { toast(t.too_large, true); continue; }
+      if (!state.info.formats.some(suffix => file.name.toLowerCase().endsWith(suffix))) { toast(t.unsupported, true); continue; }
+      if (file.size > state.info.max_upload_bytes) { toast(t.too_large, true); continue; }
       await call("POST", `/knowledge-bases/${encodeURIComponent(base)}/documents`, {
         query: { name: file.name },
         body: await file.arrayBuffer(),
-        contentType: file.type || "text/plain",
-      }).then(() => toast(format(t.uploaded, { name: file.name }))).catch(() => {});
+        contentType: file.type || "application/octet-stream",
+      }).then(response => toast(format(response.json.status === "pending_config" ? t.uploaded_pending : t.uploaded, { name: file.name })))
+        .catch(() => {});
     }
     await loadDocuments();
   }
@@ -291,6 +372,95 @@ limitations under the License.
   dropzone.addEventListener("dragover", event => { event.preventDefault(); dropzone.classList.add("over"); });
   dropzone.addEventListener("dragleave", () => dropzone.classList.remove("over"));
   dropzone.addEventListener("drop", event => { event.preventDefault(); dropzone.classList.remove("over"); upload([...event.dataTransfer.files]); });
+
+  // Chunks: read the current revision's chunk set, edit it, and save it as a new revision.
+
+  let chunkParser = null;
+  let dirty = false;
+
+  async function openChunks(item) {
+    const path = `/knowledge-bases/${encodeURIComponent(state.selected)}/documents/${encodeURIComponent(item.id)}`;
+    const view = (await call("GET", `${path}/chunks`)).json;
+    state.open = { item, path, view };
+    dirty = false;
+    $("#chunk-title").textContent = item.name;
+    $("#chunk-meta").textContent = format(t.chunk_meta, { revision: view.revision, parser: parserName(view.parser), count: view.chunks.length })
+      + (view.edited ? ` · ${t.edited}` : "");
+    $("#chunk-restore").disabled = view.revision <= 1;
+    chunkParser = parserPicker($("#chunk-parser"), view.parser);
+    renderChunks(view.chunks.map(chunk => ({ text: chunk.text, page: chunk.page })));
+    $("#chunk-panel").hidden = false;
+  }
+
+  function chunkItem(chunk) {
+    const text = element("textarea", { rows: Math.min(12, Math.max(3, Math.ceil(chunk.text.length / 70))) });
+    text.value = chunk.text;
+    text.addEventListener("input", () => { dirty = true; });
+    const insert = element("button", { type: "button", class: "button link" }, t.add_chunk);
+    const remove = element("button", { type: "button", class: "button link danger" }, t.remove_chunk);
+    const item = element("li", { "data-page": chunk.page ?? "" },
+      element("div", { class: "chunk-head" }, element("span", { class: "number" }),
+        chunk.page ? element("span", {}, format(t.page, { page: chunk.page })) : null,
+        element("span", { class: "spacer" }), insert, remove),
+      text);
+    insert.addEventListener("click", () => {
+      const added = chunkItem({ text: "", page: chunk.page });
+      item.after(added);
+      numberChunks();
+      added.querySelector("textarea").focus();
+      dirty = true;
+    });
+    remove.addEventListener("click", () => { item.remove(); numberChunks(); dirty = true; });
+    return item;
+  }
+
+  function numberChunks() {
+    for (const [index, node] of [...document.querySelectorAll("#chunk-list .number")].entries()) node.textContent = `#${index + 1}`;
+  }
+
+  function renderChunks(chunks) {
+    $("#chunk-list").replaceChildren(...chunks.map(chunkItem));
+    numberChunks();
+  }
+
+  function closeChunks() {
+    $("#chunk-panel").hidden = true;
+    state.open = null;
+  }
+
+  $("#chunk-close").addEventListener("click", closeChunks);
+  $("#chunk-panel").addEventListener("click", event => { if (event.target === event.currentTarget && !dirty) closeChunks(); });
+
+  $("#chunk-save").addEventListener("click", async () => {
+    const chunks = [...document.querySelectorAll("#chunk-list li")].map(node => ({
+      text: node.querySelector("textarea").value.trim(),
+      page: node.dataset.page ? Number(node.dataset.page) : null,
+    }));
+    if (!chunks.length || chunks.some(chunk => !chunk.text)) { toast(t.empty_chunk, true); return; }
+    const { item, path, view } = state.open;
+    const saved = (await call("PUT", `${path}/chunks`, { json: { expected_revision: view.revision, chunks } })).json;
+    toast(format(t.chunks_saved, { revision: saved.revision }));
+    await loadDocuments();
+    await openChunks({ ...item, revision: saved.revision });
+  });
+
+  $("#chunk-restore").addEventListener("click", async () => {
+    const { item, path, view } = state.open;
+    await call("POST", `${path}/restorations`, { json: { revision: view.revision - 1 } });
+    toast(format(t.restored, { revision: view.revision - 1 }));
+    await loadDocuments();
+    await openChunks(item);
+  });
+
+  $("#chunk-reparse").addEventListener("click", async () => {
+    const { item } = state.open;
+    await call("POST", `/knowledge-bases/${encodeURIComponent(state.selected)}/processing`, {
+      json: { parser: chunkParser(), document_ids: [item.id] },
+    });
+    toast(t.reparse_started);
+    closeChunks();
+    await loadDocuments();
+  });
 
   // Search and ask
 
@@ -327,6 +497,7 @@ limitations under the License.
     $("#hits").replaceChildren(...(hits.length ? hits.map(hit => element("li", { class: "card" },
       element("div", { class: "meta" },
         element("strong", {}, hit.document_name),
+        hit.page ? element("span", { class: "page" }, format(t.page, { page: hit.page })) : null,
         element("span", { class: "muted" }, state.bases.find(base => base.id === hit.knowledge_base_id)?.name || ""),
         element("span", { class: "badge plain" }, hit.score.toFixed(3))),
       element("div", { class: "text" }, hit.text),
