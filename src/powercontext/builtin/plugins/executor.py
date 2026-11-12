@@ -124,14 +124,15 @@ async def execute_plugin(  # noqa: C901 - one window from selection through ackn
                     )
             window = ()
             if inputs is not None:
-                key = inputs.projection_key
                 accepted = frozenset(inputs.source_types)
                 # A matching Source without the declared Projection fails the window here.
                 window = tuple(
                     GenerationSource(
                         ref=row.ref,
                         position=row.journal_position,
-                        projection=BUILTIN_SOURCE_REGISTRY.project(row.value, key),
+                        projection=BUILTIN_SOURCE_REGISTRY.project(
+                            row.value, inputs.projection_key(row.ref.source_type)
+                        ),
                     )
                     for row in rows
                     if row.ref.source_type in accepted

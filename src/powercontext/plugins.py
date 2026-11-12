@@ -77,18 +77,36 @@ class Cron(BaseModel):
     timezone: str = "Asia/Shanghai"
 
 
+_PROJECTION = r"^[^@\s]+@[^@\s]+$"
+
+
 class Inputs(BaseModel):
-    """The Sources delivered to ``generate`` and the Projection each one arrives in."""
+    """The Sources delivered to ``generate`` and the Projection each one arrives in.
+
+    ``projection`` applies to every Source type; ``projections`` names a different one for
+    particular types. Every listed type needs one or the other.
+    """
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
     source_types: tuple[Annotated[str, Field(min_length=1)], ...] = Field(min_length=1)
-    projection: str = Field(pattern=r"^[^@\s]+@[^@\s]+$")
+    projection: str | None = Field(default=None, pattern=_PROJECTION)
+    projections: dict[str, Annotated[str, Field(pattern=_PROJECTION)]] = Field(default_factory=dict)
     max_sources: int = Field(default=50, ge=1, le=1000)
 
-    @property
-    def projection_key(self) -> SourceProjectionKey:
-        name, version = self.projection.rsplit("@", 1)
+    @model_validator(mode="after")
+    def every_type_has_a_projection(self) -> Inputs:
+        if set(self.projections) - set(self.source_types):
+            raise ValueError("projections may only name listed source_types")  # noqa: TRY003
+        if self.projection is None and set(self.source_types) - set(self.projections):
+            raise ValueError("every source type needs a projection")  # noqa: TRY003
+        return self
+
+    def projection_key(self, source_type: str) -> SourceProjectionKey:
+        projection = self.projections.get(source_type, self.projection)
+        if projection is None:
+            raise KeyError(source_type)
+        name, version = projection.rsplit("@", 1)
         return SourceProjectionKey(name=name, version=version)
 
 

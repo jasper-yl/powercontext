@@ -334,7 +334,7 @@ powercontext source-agent --server https://memory.example.com
 | 字段 | 默认值 | 说明 |
 | --- | --- | --- |
 | `family` | 必填 | 插件拥有的 Artifact family，不能与内置 family 或其他插件重复 |
-| `inputs` | `None` | `Inputs(source_types=..., projection=..., max_sources=50)`：消费的 Source 类型、每条 Source 交付的 Projection、单个窗口的条数上限；为空表示不消费 Source |
+| `inputs` | `None` | `Inputs(source_types=..., projection=..., projections={...}, max_sources=50)`：消费的 Source 类型、每条 Source 交付的 Projection、单个窗口的条数上限；为空表示不消费 Source。`projection` 适用于所有类型，`projections` 按 Source 类型指定不同的 Projection，每个类型必须有其一 |
 | `on_sources` | `False` | 新 Source 到达后触发；需要 `inputs` |
 | `schedule` | `None` | `Interval(seconds=...)` 或 `Cron(expression=..., timezone=...)`；与 `on_sources` 至少配置一项 |
 | `scopes` | `None` | 可服务的 Scope 名单；不消费 Source 的插件必须填写 |
@@ -637,7 +637,7 @@ class GenerateRequest(BaseModel):
 class GenerationSource(BaseModel):
     ref: SourceRef                        # 精确 Source 引用
     position: int                         # Source 在 journal 中的位置，用于按采集顺序处理
-    projection: JsonValue                 # inputs.projection 指定的 Projection 内容
+    projection: JsonValue                 # 按该 Source 类型声明的 Projection 内容
 ```
 
 ### 3.2 写入器与写事务

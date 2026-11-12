@@ -59,8 +59,8 @@ from powercontext.sources import Source, SourceMaterialization, SourceRef
 FAMILY = "document"
 DOCUMENT_SOURCE = "kb-document"
 EDIT_SOURCE = "kb-chunk-edit"
-# Generation receives both Source types through one Projection.
-PROJECTION = "knowledge-base.request"
+UPLOAD_PROJECTION = "knowledge-base.upload"
+EDIT_PROJECTION = "knowledge-base.chunk-edit"
 MAX_UPLOAD_BYTES = 32 * 1024 * 1024
 MAX_CHUNKS = 2000
 
@@ -109,13 +109,6 @@ class ChunkEditSource(Source):
     edited_by: str
 
 
-class KnowledgeBaseRequest(BaseModel):
-    """What generation receives for either Source type."""
-
-    upload: DocumentUpload | None = None
-    edit: ChunkEditRecord | None = None
-
-
 def _upload(source: DocumentUploadSource) -> DocumentUpload:
     return DocumentUpload(
         upload_id=source.name,
@@ -142,21 +135,20 @@ def _edit(source: ChunkEditSource) -> ChunkEditRecord:
 
 
 class DocumentUploadProjection:
-    name = PROJECTION
+    name = UPLOAD_PROJECTION
     version = "1"
     source_class = DocumentUploadSource
-    output_class: type[BaseModel] = KnowledgeBaseRequest
+    output_class: type[BaseModel] = DocumentUpload
 
-    def project(self, source: DocumentUploadSource, /) -> KnowledgeBaseRequest:
-        return KnowledgeBaseRequest(upload=_upload(source))
+    def project(self, source: DocumentUploadSource, /) -> DocumentUpload:
+        return _upload(source)
 
 
 class DocumentUploadDefinition:
     input_class = DocumentUpload
     name = DOCUMENT_SOURCE
     source_class = DocumentUploadSource
-    # Version 3 delivers uploads through the shared request Projection.
-    version = "3"
+    version = "4"
     projections = (DocumentUploadProjection(),)
 
     async def resolve(self, value: DocumentUpload, /) -> DocumentUploadSource:
@@ -179,20 +171,20 @@ class DocumentUploadDefinition:
 
 
 class ChunkEditProjection:
-    name = PROJECTION
+    name = EDIT_PROJECTION
     version = "1"
     source_class = ChunkEditSource
-    output_class: type[BaseModel] = KnowledgeBaseRequest
+    output_class: type[BaseModel] = ChunkEditRecord
 
-    def project(self, source: ChunkEditSource, /) -> KnowledgeBaseRequest:
-        return KnowledgeBaseRequest(edit=_edit(source))
+    def project(self, source: ChunkEditSource, /) -> ChunkEditRecord:
+        return _edit(source)
 
 
 class ChunkEditDefinition:
     input_class = ChunkEditRecord
     name = EDIT_SOURCE
     source_class = ChunkEditSource
-    version = "1"
+    version = "2"
     projections = (ChunkEditProjection(),)
 
     async def resolve(self, value: ChunkEditRecord, /) -> ChunkEditSource:
@@ -868,14 +860,13 @@ class KnowledgeBasePlugin:
     async def generate(self, request: GenerateRequest, writer: ArtifactWriter) -> None:
         planned: list[tuple[str, DocumentContent | ChunkEditRecord, SourceRef]] = []
         for source in request.sources:
-            item = KnowledgeBaseRequest.model_validate(source.projection)
-            if item.edit is not None:
+            if source.ref.source_type == EDIT_SOURCE:
+                edit = ChunkEditRecord.model_validate(source.projection)
                 # Edited chunks are already stored; embed them before the transaction.
-                await self._indexed(request.scope_id, [item.edit.chunk_set])
-                planned.append((item.edit.document_id, item.edit, source.ref))
+                await self._indexed(request.scope_id, [edit.chunk_set])
+                planned.append((edit.document_id, edit, source.ref))
                 continue
-            assert item.upload is not None  # noqa: S101 - every request carries an upload or an edit
-            upload = item.upload
+            upload = DocumentUpload.model_validate(source.projection)
             content = DocumentContent(
                 knowledge_base_id=upload.knowledge_base_id,
                 name=upload.name,
@@ -969,7 +960,11 @@ DOC = KB + "/documents/{document_id}"
 
 plugin = ArtifactPlugin(
     family=FAMILY,
-    inputs=Inputs(source_types=(DOCUMENT_SOURCE, EDIT_SOURCE), projection=f"{PROJECTION}@1", max_sources=20),
+    inputs=Inputs(
+        source_types=(DOCUMENT_SOURCE, EDIT_SOURCE),
+        projections={DOCUMENT_SOURCE: f"{UPLOAD_PROJECTION}@1", EDIT_SOURCE: f"{EDIT_PROJECTION}@1"},
+        max_sources=20,
+    ),
     on_sources=True,
     search_fields=("name",),
     timeout_seconds=900,

@@ -380,7 +380,7 @@ requires.
 | Field | Default | Description |
 | --- | --- | --- |
 | `family` | Required | The Artifact family the plugin owns; must not duplicate a built-in family or another plugin's |
-| `inputs` | `None` | `Inputs(source_types=..., projection=..., max_sources=50)`: the Source types consumed, the Projection each Source is delivered in, and the maximum Sources per window; empty means the plugin consumes no Sources |
+| `inputs` | `None` | `Inputs(source_types=..., projection=..., projections={...}, max_sources=50)`: the Source types consumed, the Projection each Source is delivered in, and the maximum Sources per window; empty means the plugin consumes no Sources. `projection` applies to every type, `projections` names a different Projection per Source type, and every type needs one or the other |
 | `on_sources` | `False` | Trigger after new Sources arrive; requires `inputs` |
 | `schedule` | `None` | `Interval(seconds=...)` or `Cron(expression=..., timezone=...)`; declare at least one of this and `on_sources` |
 | `scopes` | `None` | Scopes the plugin may serve; required for plugins that consume no Sources |
@@ -719,7 +719,7 @@ class GenerateRequest(BaseModel):
 class GenerationSource(BaseModel):
     ref: SourceRef                        # exact Source reference
     position: int                         # the Source's journal position, for processing in collection order
-    projection: JsonValue                 # the Projection named by inputs.projection
+    projection: JsonValue                 # the Projection declared for this Source type
 ```
 
 ### 3.2 Writer and write transaction
