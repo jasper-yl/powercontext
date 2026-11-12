@@ -62,7 +62,7 @@ from powercontext.http import (
     ReadinessResponse,
     ReadinessStatus,
 )
-from powercontext.paths import default_scheduler_path
+from powercontext.paths import default_scheduler_path, powercontext_data_dir
 from powercontext.server.access import HttpAccessLogMiddleware
 from powercontext.server.app import _bind_evidence_access, access_readiness_checks, create_app
 from powercontext.server.artifact_plugins import (
@@ -104,6 +104,7 @@ from powercontext.server.logging import worker_logging
 from powercontext.server.mcp import mount_mcp
 from powercontext.server.metrics import CONTENT_TYPE_LATEST, HttpMetricsMiddleware, ServerMetrics
 from powercontext.server.middleware import AuthenticationMiddleware
+from powercontext.server.plugins import PluginManager
 from powercontext.server.processing_security import build_worker_security
 from powercontext.server.request_id import HttpRequestIdMiddleware
 from powercontext.server.settings import MissingAuthenticationProviderError, ServerSettings
@@ -340,6 +341,46 @@ def create_server_app(  # noqa: C901
                         runtime_config=config.runtime,
                     )
                 )
+            dispatch_plugins = (
+                config.runtime.artifact_processing_supervisor_mode == "global"
+                and config.runtime.artifact_processing_role != "api"
+            )
+
+            def bind_supervisor(supervisors) -> None:
+                runtime.artifact_processing_supervisor = supervisors
+
+            app.state.plugin_manager = await resources.enter_async_context(
+                PluginManager(
+                    records.database,
+                    config.database,
+                    runtime.artifact_processing_supervisor,
+                    lambda: (
+                        build_worker_security(
+                            resolved,
+                            active_access_control,
+                            legacy_static_principal=static_principal if legacy_static_admin else None,
+                            enabled=True,
+                            injected=configured_access_control is not None,
+                        )
+                        if dispatch_plugins
+                        else None
+                    ),
+                    on_supervisor=bind_supervisor,
+                    plugins_dir=resolved.plugins_dir,
+                    register_merge=None if runtime.artifact_merge is None else runtime.artifact_merge.register,
+                    dispatch=dispatch_plugins,
+                    inference_config=config.inference,
+                    storage_root=powercontext_data_dir() / "plugins",
+                    # Host processes authorize callers in every role that serves requests.
+                    host_security_builder=lambda: build_worker_security(
+                        resolved,
+                        active_access_control,
+                        legacy_static_principal=static_principal if legacy_static_admin else None,
+                        enabled=True,
+                        injected=configured_access_control is not None,
+                    ),
+                )
+            )
             if active_access_control is not None:
                 migrated, unresolved = await runtime._records().migrate_handoff_receipts(
                     active_access_control.committed_receipt_identity,
@@ -353,6 +394,7 @@ def create_server_app(  # noqa: C901
             gateway = await _source_gateway(runtime, resolved)
             await resources.enter_async_context(gateway)
             app.state.source_gateway = gateway
+            app.state.plugin_api_max_body_bytes = resolved.plugin_api_max_body_bytes
             app.state.application = runtime
             app.state.dashboard_runtime = runtime
             app.state.access_control = active_access_control
@@ -391,6 +433,7 @@ def create_server_app(  # noqa: C901
                 _log_lifecycle("server.stopping", "PowerContext Server is stopping")
                 readiness_probe.unbind()
                 app.state.artifact_plugin_manager = None
+                app.state.plugin_manager = None
                 app.state.artifact_declaration_provider = None
                 app.state.artifact_access_refresher = None
                 app.state.application = None
@@ -443,6 +486,7 @@ def create_server_app(  # noqa: C901
         HttpResourceLimitsMiddleware,
         max_request_body_bytes=resolved.http.max_request_body_bytes,
         max_concurrent_requests=resolved.http.max_concurrent_requests,
+        plugin_api_max_body_bytes=resolved.plugin_api_max_body_bytes,
     )
     app.add_middleware(HttpRequestIdMiddleware)
     if metrics is not None:

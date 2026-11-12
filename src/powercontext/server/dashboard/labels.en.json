@@ -315,5 +315,7 @@
   "review_effect_tag": "Approval checks the Tag ETag and content baseline together, replacing tags without creating an Artifact revision.",
   "review_history": "Candidate versions and decisions",
   "review_unavailable": "Evidence unavailable; approval will recheck it.",
-  "review_target_unavailable": "Target content unavailable; a complete diff cannot be shown."
+  "review_target_unavailable": "Target content unavailable; a complete diff cannot be shown.",
+  "plugin": "Plugin",
+  "plugin_page_stopped": "The plugin page navigated away from its start page, so requests are no longer forwarded for it. Reopen the page to continue."
 }

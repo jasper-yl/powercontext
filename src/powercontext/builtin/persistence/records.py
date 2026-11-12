@@ -68,6 +68,7 @@ from powercontext.builtin.persistence.tables import (
     SOURCES_TABLE,
 )
 from powercontext.builtin.persistence.tags import RelationalTagService, tag_predicate
+from powercontext.builtin.plugins.families import PluginArtifactContent
 from powercontext.builtin.records import (
     ArtifactCollectionItem,
     ArtifactCreated,
@@ -842,6 +843,10 @@ class RelationalRecordService:
             raise BaseOperationNotSupportedError("artifact_family", family, "legacy Memory collection read")
         if family in self._artifacts.families:
             return self._artifacts
+        from powercontext.builtin.plugins.families import is_plugin_family, plugin_artifact_repository
+
+        if is_plugin_family(family):
+            return plugin_artifact_repository(family, self._sources)
         if connection is None:
             async with self._database.transaction() as borrowed:
                 return await self._read_repository(family, connection=borrowed)
@@ -935,6 +940,8 @@ def _artifact_record(
     if isinstance(artifact.content, StoredArtifactContent):
         schema_version = artifact.content.schema_version
         content = artifact.content.content
+    elif isinstance(artifact.content, PluginArtifactContent):
+        content = artifact.content.content
     return ArtifactRecord(
         scope_id=scope_id,
         family=cast(Any, artifact.family),
@@ -965,6 +972,8 @@ def _artifact_collection_item(scope_id: str, artifact: Artifact[Any]) -> Artifac
     schema_version = None
     if isinstance(artifact.content, StoredArtifactContent):
         schema_version = artifact.content.schema_version
+        content = artifact.content.content
+    elif isinstance(artifact.content, PluginArtifactContent):
         content = artifact.content.content
     return ArtifactCollectionItem(
         scope_id=scope_id,
