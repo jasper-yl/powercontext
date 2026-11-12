@@ -1608,6 +1608,10 @@ def create_app(
     _add_route(app, MERGE_ARTIFACTS, merge_artifacts)
     _add_route(app, FORGET_ARTIFACT, forget_artifact)
     _add_route(app, RESTORE_ARTIFACT, restore_artifact)
+    from powercontext.paths import powercontext_data_dir
+    from powercontext.server.source_collection import mount_source_collection_routes
+
+    mount_source_collection_routes(app, powercontext_data_dir())
     from powercontext.source_management.gateway import mount_source_routes
 
     mount_source_routes(app)

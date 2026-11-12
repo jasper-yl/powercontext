@@ -731,6 +731,137 @@ class ArtifactPlugin(ArtifactPluginSpec):
     api: PluginApi | None = None
 
 
+Normalizer = Annotated[str, Field(pattern=r"^(strip|lower|collapse_spaces|remove_prefix:.+|remove_suffix:.+)$")]
+
+
+class TargetSpec(BaseModel):
+    """What a collection target takes: its parameters and which of them identify it."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, arbitrary_types_allowed=True)
+
+    description: str = Field(min_length=1, max_length=2048)
+    parameters: type[BaseModel] = Field(exclude=True)
+    # Parameters that form the target's unique key, each with its normalization steps.
+    identity: dict[str, tuple[Normalizer, ...]] = Field(min_length=1)
+
+    @model_validator(mode="after")
+    def identity_names_string_parameters(self) -> TargetSpec:
+        fields = self.parameters.model_fields
+        for name in self.identity:
+            if name not in fields or fields[name].annotation is not str:
+                raise ValueError(f"identity parameter {name} must be a string field of parameters")  # noqa: TRY003
+        return self
+
+    def schema_json(self) -> dict[str, JsonValue]:
+        return self.parameters.model_json_schema()
+
+
+class Collect(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
+
+    schedule: Interval | Cron
+    max_targets: int = Field(default=50, ge=1, le=1000)
+    max_items: int = Field(default=200, ge=1, le=10000)
+    timeout_seconds: float = Field(default=120, gt=0)
+    max_workers: int = Field(default=1, ge=1)
+
+
+class CollectTarget(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    target_id: str
+    parameters: dict[str, JsonValue]
+    # The target's last committed checkpoint; None the first time; read-only.
+    checkpoint: JsonValue | None = None
+
+
+class CollectRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    scope_id: str
+    reason: Literal["schedule", "target_added"] = "schedule"
+    targets: tuple[CollectTarget, ...]
+    max_items: int
+
+
+class CollectedItem(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True, arbitrary_types_allowed=True)
+
+    definition: str
+    value: BaseModel
+
+
+class TargetResult(BaseModel):
+    model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
+
+    items: list[CollectedItem] = Field(default_factory=list)
+    checkpoint: JsonValue | None = None
+    has_more: bool = False
+
+
+class CollectResult(BaseModel):
+    model_config = ConfigDict(extra="forbid", arbitrary_types_allowed=True)
+
+    targets: dict[str, TargetResult] = Field(default_factory=dict)
+
+    def add(
+        self,
+        target: CollectTarget,
+        items: Sequence[CollectedItem],
+        *,
+        checkpoint: JsonValue | None,
+        has_more: bool = False,
+    ) -> None:
+        self.targets[target.target_id] = TargetResult(items=list(items), checkpoint=checkpoint, has_more=has_more)
+
+
+class SourceCollector(Protocol):
+    async def collect(self, request: CollectRequest, /) -> CollectResult: ...
+
+
+class PluginResponse(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    status: int
+    json_body: JsonValue | None = None
+
+
+class PluginCenter(Protocol):
+    """A device runner's calls to its own plugin's routes on the central Server, with the runner's credential."""
+
+    async def call_plugin(
+        self,
+        method: str,
+        path: str,
+        /,
+        *,
+        json: JsonValue | None = None,
+        content: bytes | None = None,
+        content_type: str | None = None,
+    ) -> PluginResponse: ...
+
+
+class SourcePlugin(BaseModel):
+    """A plugin that provides Source types and, with ``collect``, collects from external systems.
+
+    The plugin name, its directory name, is also the name of its collection capability.
+    """
+
+    model_config = ConfigDict(extra="forbid", frozen=True, arbitrary_types_allowed=True)
+
+    definitions: tuple[Any, ...] = Field(min_length=1)
+    collect: Collect | None = None
+    target: TargetSpec | None = None
+    scopes: tuple[Annotated[str, Field(min_length=1, max_length=256)], ...] | None = None
+    setup: Callable[[PluginContext], Awaitable[SourceCollector]] | None = None
+
+    @model_validator(mode="after")
+    def collection_is_complete(self) -> SourcePlugin:
+        if (self.collect is None) != (self.target is None) or (self.collect is None) != (self.setup is None):
+            raise ValueError("collect, target, and setup go together")  # noqa: TRY003
+        return self
+
+
 def _path_parameters(path: str) -> tuple[str, ...]:
     import re
 
@@ -754,6 +885,11 @@ __all__ = [
     "BinaryResponse",
     "Caller",
     "ChatMessage",
+    "Collect",
+    "CollectRequest",
+    "CollectResult",
+    "CollectTarget",
+    "CollectedItem",
     "CreateRequest",
     "Cron",
     "ForgetRequest",
@@ -768,9 +904,11 @@ __all__ = [
     "ModelUnavailable",
     "PluginApi",
     "PluginApiSpec",
+    "PluginCenter",
     "PluginContext",
     "PluginModels",
     "PluginPages",
+    "PluginResponse",
     "PluginScope",
     "PluginScopes",
     "PluginSources",
@@ -783,6 +921,10 @@ __all__ = [
     "SearchHit",
     "SearchRequest",
     "SearchResult",
+    "SourceCollector",
+    "SourcePlugin",
+    "TargetResult",
+    "TargetSpec",
     "UndoMergePreview",
     "UpdateRequest",
 ]
