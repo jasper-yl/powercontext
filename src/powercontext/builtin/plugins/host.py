@@ -66,6 +66,7 @@ from powercontext.plugins import (
     InvalidContent,
     MergeInput,
     MergeRequest,
+    ModelUnavailable,
     PluginContext,
     PluginScope,
     RestoreRequest,
@@ -211,6 +212,8 @@ class _Host:
             response = HostResponse(request.id, "forbidden")
         except PluginWriteError as error:
             response = HostResponse(request.id, "invalid_content", message=str(error))
+        except ModelUnavailable:
+            response = HostResponse(request.id, "model_unavailable")
         except Exception as error:
             logger.warning("Plugin %s request failed (%s)", self.manifest.name, type(error).__name__)
             response = HostResponse(request.id, "error", error_type=type(error).__name__)
@@ -221,7 +224,21 @@ class _Host:
     async def _dispatch(self, request: HostRequest) -> HostResponse:
         if request.method == "api":
             return await self._api(request)
+        if request.method == "create_source":
+            return await self._create_source(request)
         return await self._change(request)
+
+    async def _create_source(self, request: HostRequest) -> HostResponse:
+        """A generic Source write of one of this plugin's types: validate the input, then resolve and store it."""
+
+        scope_id = request.scope_id
+        if scope_id is None or self.definitions is None:
+            return HostResponse(request.id, "not_found")
+        await self.require("scope.contribute", scope_id)
+        selected = self.definitions.definition_for_name(request.payload["source_type"])
+        value = selected.input_class.model_validate(request.payload["content"])
+        ref = await self.store_source(scope_id, request.payload["source_type"], value)
+        return HostResponse(request.id, "ok", result=ref.model_dump(mode="json"))
 
     def _writer(self, scope_id: str, *, change: UserChange | None = None) -> PluginArtifactWriter:
         spec = self.manifest.spec
@@ -398,6 +415,29 @@ class _Host:
     def reads(self, scope_id: str) -> Any:
         return _CheckedReads(self, scope_id)
 
+    async def store_source(self, scope_id: str, definition: str, value: BaseModel) -> SourceRef:
+        """Resolve and project an input of one of this plugin's Source types, then store it like a remote observation."""
+
+        if self.definitions is None:
+            raise ValueError("the plugin declares no Source Definitions")  # noqa: TRY003
+        from powercontext.builtin.sources.observation_validation import validate_source_observation
+        from powercontext.sources.observations import SourceDefinitionManifest, project_source_for_transport
+
+        selected = self.definitions.definition_for_name(definition)
+        if not isinstance(value, selected.input_class):
+            raise TypeError(f"{definition} expects {selected.input_class.__name__}")  # noqa: TRY003
+        observation = project_source_for_transport(self.definitions, await self.definitions.resolve(value))
+        manifest = next(
+            SourceDefinitionManifest.model_validate(item)
+            for item in self.manifest.source_manifests
+            if item["name"] == definition
+        )
+        validate_source_observation(observation, manifest)
+        repository = SourceRepository(BUILTIN_SOURCE_REGISTRY)
+        async with self.database.transaction() as connection:
+            stored = await repository.add(connection, scope_id, observation)
+        return stored.ref
+
     def writer(self, scope_id: str) -> PluginArtifactWriter:
         if scope_id not in _CURRENT.get().contribute_scopes:
             raise AccessDenied("call ctx.require('scope.contribute', scope_id) before writing")  # noqa: TRY003
@@ -437,28 +477,9 @@ class _Sources:
         self._host = host
 
     async def submit(self, scope_id: str, definition: str, value: BaseModel, /) -> SourceRef:
-        host = self._host
         if scope_id not in _CURRENT.get().contribute_scopes:
             raise AccessDenied("call ctx.require('scope.contribute', scope_id) before submitting Sources")  # noqa: TRY003
-        if host.definitions is None:
-            raise ValueError("the plugin declares no Source Definitions")  # noqa: TRY003
-        from powercontext.builtin.sources.observation_validation import validate_source_observation
-        from powercontext.sources.observations import SourceDefinitionManifest, project_source_for_transport
-
-        selected = host.definitions.definition_for_name(definition)
-        if not isinstance(value, selected.input_class):
-            raise TypeError(f"{definition} expects {selected.input_class.__name__}")  # noqa: TRY003
-        observation = project_source_for_transport(host.definitions, await host.definitions.resolve(value))
-        manifest = next(
-            SourceDefinitionManifest.model_validate(item)
-            for item in host.manifest.source_manifests
-            if item["name"] == definition
-        )
-        validate_source_observation(observation, manifest)
-        repository = SourceRepository(BUILTIN_SOURCE_REGISTRY)
-        async with host.database.transaction() as connection:
-            stored = await repository.add(connection, scope_id, observation)
-        return stored.ref
+        return await self._host.store_source(scope_id, definition, value)
 
 
 class _Scopes:

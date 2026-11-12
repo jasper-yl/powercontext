@@ -20,7 +20,13 @@ from dataclasses import dataclass, field
 from typing import Any, Literal
 
 HostMethod = Literal[
-    "create_artifact", "update_artifact", "merge_artifacts", "forget_artifact", "restore_artifact", "api"
+    "create_artifact",
+    "update_artifact",
+    "merge_artifacts",
+    "forget_artifact",
+    "restore_artifact",
+    "create_source",
+    "api",
 ]
 HostOutcome = Literal[
     "ok",
@@ -32,6 +38,7 @@ HostOutcome = Literal[
     "conflict",
     "contract_violation",
     "api_error",
+    "model_unavailable",
     "error",
 ]
 

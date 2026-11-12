@@ -30,6 +30,10 @@ class Notes:
                 text = source.projection["content"]
                 await tx.put(writer.stable_id(source.ref.source_id), content={"text": text}, source_refs=[source.ref])
 
+    async def create_artifact(self, request, writer) -> None:
+        async with writer.transaction() as tx:
+            await tx.put(request.artifact_id, content=request.content)
+
     async def update_artifact(self, request, writer) -> None:
         async with writer.transaction() as tx:
             await tx.put(request.artifact_id, content=request.content, expected_revision=request.expected_revision)
@@ -97,6 +101,32 @@ def test_server_loads_plugins_dispatches_on_sources_and_serves_the_artifact_api(
                 bodies[item["artifact_id"]] = response.json()["content"]["text"]
             assert set(bodies.values()) == {"Deploys go to the east region", "Rotate signing keys monthly"}
             assert await search(client, scope, "region") == ["Deploys go to the east region"]
+
+            # The generic create route takes a plugin family's content; core allocates the ID.
+            created = await client.post(
+                f"/v1/scopes/{scope}/artifacts", json={"family": "notes", "content": {"text": "Freeze on Fridays"}}
+            )
+            assert created.status_code == 201, created.text
+            assert (created.json()["family"], created.json()["revision"]) == ("notes", 1)
+            assert created.headers["ETag"] == '"revision:1"'
+            assert (await client.get(created.headers["Location"])).json()["content"] == {"text": "Freeze on Fridays"}
+            assert await search(client, scope, "fridays") == ["Freeze on Fridays"]
+            await client.post(
+                f"/v1/scopes/{scope}/artifacts/notes/{created.json()['artifact_id']}/forget",
+                json={
+                    "revision": 1,
+                    "state_version": (await governance(client, f"{created.headers['Location']}/governance"))[
+                        "state_version"
+                    ],
+                },
+            )
+            # Built-in names keep their own contract; a family no plugin provides is invalid.
+            builtin = await client.post(
+                f"/v1/scopes/{scope}/artifacts", json={"family": "memory", "content": {"text": "x"}}
+            )
+            assert builtin.status_code == 422, builtin.text
+            unknown = await client.post(f"/v1/scopes/{scope}/artifacts", json={"family": "nope", "content": {}})
+            assert unknown.status_code == 422, unknown.text
 
             async def progress():
                 response = await client.get("/v1/plugins/notes/scopes")
@@ -263,5 +293,103 @@ def test_generic_merge_routes_serve_registered_built_in_families(tmp_path):
             assert [ref["artifact_id"] for ref in restored.json()["retired"]] == [result]
             state = await governance(client, f"{first}/governance")
             assert (state["lifecycle_state"], state["merged_into_id"]) == ("active", None)
+
+    asyncio.run(scenario())
+
+
+TICKETS = """
+from pydantic import BaseModel, Field
+
+from powercontext.plugins import ArtifactPlugin, Inputs
+from powercontext.sources import Source, SourceMaterialization
+
+
+class TicketInput(BaseModel):
+    key: str = Field(pattern=r"^[A-Z]+-[0-9]+$")
+    title: str = Field(min_length=1)
+
+
+class TicketSource(Source):
+    title: str
+
+
+class TicketProjection:
+    name = "tickets.ticket"
+    version = "1"
+    source_class = TicketSource
+    output_class = TicketInput
+
+    def project(self, source, /):
+        return TicketInput(key=source.name, title=source.title)
+
+
+class TicketDefinition:
+    input_class = TicketInput
+    name = "ticket"
+    source_class = TicketSource
+    version = "1"
+    projections = (TicketProjection(),)
+
+    async def resolve(self, value, /):
+        return TicketSource(
+            name=value.key, materialization=SourceMaterialization.CAPTURED, description="A ticket", title=value.title
+        )
+
+    async def read(self, source, /):
+        return TicketProjection().project(source)
+
+
+class Tickets:
+    async def generate(self, request, writer):
+        async with writer.transaction() as tx:
+            for source in request.sources:
+                key = source.projection["key"]
+                await tx.put(writer.stable_id(key), content=source.projection, source_refs=[source.ref])
+
+
+async def create(ctx):
+    return Tickets()
+
+
+plugin = ArtifactPlugin(
+    family="tickets",
+    inputs=Inputs(source_types=("ticket",), projection="tickets.ticket@1"),
+    on_sources=True,
+    definitions=(TicketDefinition(),),
+    create=create,
+)
+"""
+
+
+def test_generic_source_api_writes_plugin_source_types(tmp_path):
+    plugins = tmp_path / "plugins"
+    (plugins / "tickets").mkdir(parents=True)
+    (plugins / "tickets" / "plugin.py").write_text(TICKETS, encoding="utf-8")
+
+    async def scenario():
+        async with running_server(tmp_path, plugins) as client:
+            scope = await create_scope(client, "plugin-sources-e2e")
+            sources = f"/v1/scopes/{scope}/sources"
+            ticket = {"source_type": "ticket", "content": {"key": "OPS-7", "title": "Disk full on db-1"}}
+            created = await client.post(sources, json=ticket)
+            assert created.status_code == 201, created.text
+            assert (created.json()["source_type"], created.json()["source_id"]) == ("ticket", "OPS-7")
+            stored = await client.get(created.headers["Location"])
+            assert stored.status_code == 200, stored.text
+            # The same input resolves to the same Source.
+            assert (await client.post(sources, json=ticket)).json()["position"] == created.json()["position"]
+
+            invalid = await client.post(sources, json={"source_type": "ticket", "content": {"key": "bad"}})
+            assert invalid.status_code == 422, invalid.text
+            unknown = await client.post(sources, json={"source_type": "nope", "content": {}})
+            assert unknown.status_code == 404, unknown.text
+            content = await client.post(sources, json={"content": "built-in content still works"})
+            assert content.status_code == 201, content.text
+
+            tickets = await wait_for(
+                lambda: items(client, scope, "tickets"), lambda value: len(value) == 1, log=tmp_path / "server.log"
+            )
+            body = await client.get(f"/v1/scopes/{scope}/artifacts/tickets/{tickets[0]['artifact_id']}")
+            assert body.json()["content"] == {"key": "OPS-7", "title": "Disk full on db-1"}
 
     asyncio.run(scenario())

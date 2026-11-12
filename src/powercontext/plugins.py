@@ -103,6 +103,9 @@ class RouteSpec(BaseModel):
     access: Literal["authenticated", "scope.read", "scope.contribute"]
     scope_param: str | None = None
     body: Literal["none", "json", "binary"] = "none"
+    # The route's own body limit; defaults to 1 MiB for JSON and to the deployment's ceiling for binary
+    # bodies. The deployment's POWERCONTEXT_SERVER_PLUGIN_API_MAX_BODY_BYTES always caps it.
+    max_body_bytes: int | None = Field(default=None, ge=1)
     timeout_seconds: float = Field(default=30, gt=0)
     description: str | None = None
     mcp: bool = False
@@ -117,6 +120,8 @@ class RouteSpec(BaseModel):
                 raise ValueError("authenticated routes do not take scope_param")  # noqa: TRY003
         elif self.scope_param not in parameters:
             raise ValueError("Scope routes must name a path parameter as scope_param")  # noqa: TRY003
+        if self.max_body_bytes is not None and self.body == "none":
+            raise ValueError("max_body_bytes needs a JSON or binary body")  # noqa: TRY003
         if self.mcp and (self.body == "binary" or not self.description):
             raise ValueError("MCP routes need a description and a JSON or empty body")  # noqa: TRY003
         return self
@@ -163,6 +168,31 @@ class PluginApi(PluginApiSpec):
     routes: tuple[Route, ...] = Field(min_length=1, max_length=200)
 
 
+class PluginPages(BaseModel):
+    """Static pages the Dashboard shows in a sandboxed frame; they reach only this plugin's routes."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    directory: str = Field(default="ui", pattern=r"^[A-Za-z0-9._-]+(?:/[A-Za-z0-9._-]+)*$")
+    entry: str = Field(default="index.html", pattern=r"^[A-Za-z0-9._-]+\.html$")
+    # Navigation title by language; English is required as the fallback.
+    title: dict[str, Annotated[str, Field(min_length=1, max_length=64)]]
+
+    @field_validator("directory")
+    @classmethod
+    def inside_plugin(cls, value: str) -> str:
+        if ".." in value.split("/"):
+            raise ValueError("directory must stay inside the plugin directory")  # noqa: TRY003
+        return value
+
+    @field_validator("title")
+    @classmethod
+    def has_english(cls, value: dict[str, str]) -> dict[str, str]:
+        if "en" not in value:
+            raise ValueError("title needs an en entry")  # noqa: TRY003
+        return value
+
+
 class ArtifactPluginSpec(BaseModel):
     """The data part of a declaration: what core needs before it runs plugin code."""
 
@@ -183,6 +213,7 @@ class ArtifactPluginSpec(BaseModel):
     # Time limit of one user change or plugin API call in the host process.
     change_timeout_seconds: float = Field(default=30, gt=0)
     api: PluginApiSpec | None = None
+    pages: PluginPages | None = None
 
     @field_validator("family")
     @classmethod
@@ -212,6 +243,8 @@ class ArtifactPluginSpec(BaseModel):
             raise ValueError("plugins without inputs must list scopes explicitly")  # noqa: TRY003
         if self.transaction_timeout_seconds > self.timeout_seconds:
             raise ValueError("transaction_timeout_seconds must not exceed timeout_seconds")  # noqa: TRY003
+        if self.pages is not None and self.api is None:
+            raise ValueError("pages call the plugin's own routes; declare api as well")  # noqa: TRY003
         return self
 
 
@@ -285,13 +318,36 @@ class PluginStorage(Protocol):
     def engine(self) -> AsyncEngine: ...
 
 
+class ChatMessage(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    role: Literal["system", "user", "assistant"]
+    content: str = Field(min_length=1)
+
+
+class ModelUnavailable(Exception):
+    """The Server has no model of the kind the plugin called."""
+
+
 class PluginModels(Protocol):
-    """Server's configured models; addresses and credentials stay with core."""
+    """Server's configured models; addresses and credentials stay with core.
+
+    ``ctx.models`` is None when the Server configures neither an embedding nor a generation
+    model; a call to a kind that is not configured raises ``ModelUnavailable``.
+    """
+
+    @property
+    def embedding_available(self) -> bool: ...
 
     @property
     def embedding_dimension(self) -> int | None: ...
 
+    @property
+    def generation_available(self) -> bool: ...
+
     async def embed(self, texts: Sequence[str], /) -> tuple[tuple[float, ...], ...]: ...
+
+    async def generate(self, messages: Sequence[ChatMessage], /, *, max_tokens: int | None = None) -> str: ...
 
 
 class Caller(BaseModel):
@@ -623,6 +679,7 @@ __all__ = [
     "ArtifactWriter",
     "BinaryResponse",
     "Caller",
+    "ChatMessage",
     "CreateRequest",
     "Cron",
     "ForgetRequest",
@@ -634,10 +691,12 @@ __all__ = [
     "LifecycleState",
     "MergeInput",
     "MergeRequest",
+    "ModelUnavailable",
     "PluginApi",
     "PluginApiSpec",
     "PluginContext",
     "PluginModels",
+    "PluginPages",
     "PluginScope",
     "PluginScopes",
     "PluginSources",

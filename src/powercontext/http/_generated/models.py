@@ -12,6 +12,7 @@ from pydantic import (
     AwareDatetime,
     BaseModel,
     ConfigDict,
+    Discriminator,
     Field,
     RootModel,
     StrictBool,
@@ -20,6 +21,9 @@ from pydantic import (
     StrictStr,
     field_validator,
     model_validator,
+)
+from pydantic import (
+    Tag as UnionTag,
 )
 
 
@@ -858,6 +862,14 @@ class ArtifactRestorationResult(BaseModel):
     restored: list[ArtifactReference]
     retired: list[ArtifactReference]
     undo_merge_results: list[StrictStr]
+
+
+class CreatePluginArtifactRequest(BaseModel):
+    model_config = ConfigDict(
+        extra="forbid",
+    )
+    family: Annotated[StrictStr, Field(max_length=128, min_length=1, pattern="^[a-z][a-z0-9-]*$")]
+    content: dict[str, Any]
 
 
 class ReplacePluginArtifactRequest(BaseModel):
@@ -2956,11 +2968,19 @@ class CreateSourceRequest(BaseModel):
     model_config = ConfigDict(
         extra="forbid",
     )
-    source_type: SourceType = SourceType.CONTENT
+    source_type: Annotated[
+        StrictStr,
+        Field(
+            description="The built-in content type, or a Source type that a loaded plugin defines. A plugin type's content is that type's input; the plugin resolves it into the stored Source.",
+            max_length=128,
+            min_length=1,
+            pattern="^[a-z][a-z0-9._-]*$",
+        ),
+    ] = "content"
     content: Annotated[
         Any,
         Field(
-            description="JSON value persisted by the built-in content Source adapter. Server-reserved payload schemas, including handoff receipts, are rejected and must be created through their dedicated workflow. String values that are empty or whitespace-only are rejected."
+            description="JSON value persisted by the built-in content Source adapter, or the input of a plugin Source type. Server-reserved payload schemas, including handoff receipts, are rejected and must be created through their dedicated workflow. String values that are empty or whitespace-only are rejected."
         ),
     ]
 
@@ -4557,7 +4577,7 @@ class ArtifactCollectionItem(BaseModel):
 
 class ArtifactCreated(BaseModel):
     scope_id: Annotated[StrictStr, Field(max_length=256, min_length=1, pattern=".*\\S.*")]
-    family: BaseArtifactFamily
+    family: ArtifactReadFamily
     artifact_id: Annotated[StrictStr, Field(max_length=128, min_length=1, pattern="^[\\x21-\\x7E]+$")]
     revision: Annotated[StrictInt, Field(ge=1)]
     sources: list[SourceTypeReference]
@@ -6190,7 +6210,7 @@ class GeneratedCandidateResponse(BaseModel):
     candidate: Annotated[Candidate | None, Field(...)]
 
 
-class CreateArtifactRequest(
+class CreateBuiltinArtifactRequest(
     RootModel[
         CreateAtomicMemoryArtifactRequest
         | CreateTopicMemoryArtifactRequest
@@ -6259,3 +6279,33 @@ class PreparedContext(BaseModel):
     receipt: Annotated[
         PreparedContextReceipt | None, Field(description="Present only when requested and successfully assembled.")
     ] = None
+
+
+_CREATE_ARTIFACT_REQUEST_BUILTIN_FAMILIES = frozenset([
+    "atomic-memory",
+    "experience",
+    "handoff",
+    "memory",
+    "profile",
+    "prompt",
+    "skill",
+    "topic-memory",
+])
+
+
+def _create_artifact_request_branch(value: Any) -> str:
+    family = value.get("family") if isinstance(value, dict) else getattr(value, "family", None)
+    return (
+        "plugin" if isinstance(family, str) and family not in _CREATE_ARTIFACT_REQUEST_BUILTIN_FAMILIES else "builtin"
+    )
+
+
+class CreateArtifactRequest(RootModel[CreateBuiltinArtifactRequest | CreatePluginArtifactRequest]):
+    root: Annotated[
+        Annotated[CreateBuiltinArtifactRequest, UnionTag("builtin")]
+        | Annotated[CreatePluginArtifactRequest, UnionTag("plugin")],
+        Discriminator(_create_artifact_request_branch),
+        Field(
+            description="A built-in family's creation request, or the complete content of an Artifact in a loaded plugin's family. The family name selects the branch: built-in names select the built-in branch."
+        ),
+    ]

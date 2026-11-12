@@ -115,6 +115,7 @@ still occupies an HTTP slot until it finishes; reserve other slots for concurren
 | `POWERCONTEXT_SERVER_HTTP_HOST` | `127.0.0.1` | Listener address |
 | `POWERCONTEXT_SERVER_HTTP_PORT` | `8000` | Listener port; the configuration wizard suggests `17429` for new setups |
 | `POWERCONTEXT_SERVER_HTTP_MAX_REQUEST_BODY_BYTES` | `16777216` | Maximum external HTTP body bytes before parsing, including chunked uploads |
+| `POWERCONTEXT_SERVER_PLUGIN_API_MAX_BODY_BYTES` | `33554432` | Request and response body limit of plugin routes (`/v1/plugins/{name}/api/...` and their Dashboard page forwarding), in place of the previous setting; a plugin route may declare a lower limit, never a higher one |
 | `POWERCONTEXT_SERVER_HTTP_MAX_CONCURRENT_REQUESTS` | `64` | Per-process external HTTP requests in flight, including full streaming responses |
 | `POWERCONTEXT_SERVER_WORKSPACE` | Server startup directory | Resolution root for local project Agent Skill folders |
 | `POWERCONTEXT_SERVER_MCP_ENABLED` | `true` | Enable Streamable HTTP MCP |

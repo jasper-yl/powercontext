@@ -424,6 +424,18 @@ class PluginManager:
             raise BaseValueNotFoundError("plugin", name)
         return plugin.host
 
+    def host_for_source_type(self, source_type: str) -> tuple[PluginManifest, PluginHost] | None:
+        for plugin in self.plugins.values():
+            manifest = plugin.manifest
+            if (
+                plugin.error is None
+                and manifest is not None
+                and plugin.host is not None
+                and any(item["name"] == source_type for item in manifest.source_manifests)
+            ):
+                return manifest, plugin.host
+        return None
+
     def host_for_family(self, family: str) -> tuple[PluginManifest, PluginHost] | None:
         for plugin in self.plugins.values():
             manifest = plugin.manifest

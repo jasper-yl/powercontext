@@ -108,6 +108,10 @@ def load_plugin(directory: Path) -> tuple[PluginManifest, ArtifactPlugin]:
     except ValidationError as error:
         fields = ", ".join(".".join(str(part) for part in item["loc"]) or "plugin" for item in error.errors())
         raise PluginConfigError(f"invalid declaration fields: {fields}") from error  # noqa: TRY003
+    if spec.pages is not None:
+        pages = (directory.resolve() / spec.pages.directory).resolve()
+        if not pages.is_relative_to(directory.resolve()) or not (pages / spec.pages.entry).is_file():
+            raise PluginConfigError("pages.entry must be a file inside pages.directory")  # noqa: TRY003
     from powercontext.sources.observations import manifest_for_definition
 
     try:

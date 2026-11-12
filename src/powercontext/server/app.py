@@ -31,6 +31,7 @@ from hashlib import sha256
 from time import perf_counter
 from typing import TYPE_CHECKING, Annotated, Any, Literal, Protocol, TypeVar, cast
 from urllib.parse import quote, unquote
+from uuid import uuid4
 
 from fastapi import Depends, FastAPI, Header, Path, Query, Request, Response, status
 from fastapi import Path as PathParameter
@@ -457,7 +458,9 @@ from powercontext.http import (
     ContinueHandoffRequest,
     CreateAccessBindingRequest,
     CreateArtifactRequest,
+    CreateBuiltinArtifactRequest,
     CreateDreamRunRequest,
+    CreatePluginArtifactRequest,
     CreatePromptArtifactRequest,
     CreateRemoteSkillTargetRequest,
     CreateScopeRequest,
@@ -606,6 +609,7 @@ from powercontext.http import (
     SourceObservationReceipt,
     SourcePage,
     SourceRecord,
+    SourceType,
     SubmitSourceObservationRequest,
     TopicMemoryArtifact,
     UnpublishRemoteSkillRequest,
@@ -2785,13 +2789,42 @@ async def create_source(
     scope_id: Annotated[str, Path(min_length=1, max_length=256, pattern=r".*\S.*")],
     request: CreateSourceRequest,
     response: Response,
+    http_request: Request,
     application: Annotated[ServerApplication, Depends(_require_application)],
 ) -> SourceRecord:
+    if request.source_type != SourceType.CONTENT:
+        return await _create_plugin_source(scope_id, request, response, http_request, application)
     _reject_reserved_handoff_receipt_content(request.content)
     result = await application.records.for_scope(scope_id).create_source(
-        request.source_type.value,
+        request.source_type,
         request.content,
     )
+    response.headers["Location"] = _source_location(result)
+    return _source_record_response(result)
+
+
+async def _create_plugin_source(
+    scope_id: str,
+    request: CreateSourceRequest,
+    response: Response,
+    http_request: Request,
+    application: ServerApplication,
+) -> SourceRecord:
+    manager = http_request.app.state.plugin_manager
+    found = None if manager is None else manager.host_for_source_type(request.source_type)
+    if found is None:
+        raise BaseValueNotFoundError("source_type", request.source_type)
+    manifest, host = found
+    ref = await _call_plugin_host(
+        http_request,
+        host,
+        "create_source",
+        scope_id=scope_id,
+        payload={"source_type": request.source_type, "content": request.content},
+        timeout=manifest.spec.change_timeout_seconds,
+        operation=CREATE_SOURCE.operation_id,
+    )
+    result = await application.records.for_scope(scope_id).get_source(ref["source_type"], ref["source_id"])
     response.headers["Location"] = _source_location(result)
     return _source_record_response(result)
 
@@ -2950,15 +2983,18 @@ async def create_artifact(
     http_request: Request,
     application: Annotated[ServerApplication, Depends(_require_application)],
 ) -> ArtifactCreated:
+    if isinstance(request.root, CreatePluginArtifactRequest):
+        return await _create_plugin_artifact(scope_id, request.root, response, http_request, application)
+    builtin = request.root
     result = await application.records.for_scope(scope_id).create_artifact(
-        request.root.family,
-        _artifact_write(request),
+        builtin.root.family,
+        _artifact_write(builtin),
         **(
             {"execution_context": _atomic_execution_context(http_request, CREATE_ARTIFACT.operation_id)}
-            if request.root.family == "atomic-memory"
+            if builtin.root.family == "atomic-memory"
             else {}
         ),
-        **_artifact_owner_commit(http_request, scope_id, request.root.family),
+        **_artifact_owner_commit(http_request, scope_id, builtin.root.family),
     )
     await _establish_base_artifact_owners(
         http_request,
@@ -3391,6 +3427,9 @@ async def replace_artifact(
     return _artifact_revision_response(result)
 
 
+PLUGIN_API_JSON_BODY_BYTES = 1024 * 1024
+
+
 class PluginCallError(Exception):
     """A plugin host outcome that becomes the shared HTTP error envelope."""
 
@@ -3409,6 +3448,7 @@ _PLUGIN_OUTCOMES = {
     "precondition_failed": (412, "precondition_failed", "The Artifact changed after it was read."),
     "conflict": (409, "conflict", "The Artifact changed after it was read."),
     "contract_violation": (502, "plugin_contract_violation", "The plugin did not complete its agreed write."),
+    "model_unavailable": (503, "model_unavailable", "The Server has no model of the kind the plugin needs."),
     "error": (500, "plugin_error", "The plugin failed."),
 }
 
@@ -3497,6 +3537,35 @@ async def _replace_plugin_artifact(
     return _artifact_revision_response(result)
 
 
+async def _create_plugin_artifact(
+    scope_id: str,
+    request: CreatePluginArtifactRequest,
+    response: Response,
+    http_request: Request,
+    application: ServerApplication,
+) -> ArtifactCreated:
+    found = _plugin_family_host(http_request, request.family)
+    if found is None:
+        # Like the other generic routes, a family no loaded plugin provides is an invalid request.
+        raise InvalidBaseAccessRequestError("family", "must be a built-in or loaded plugin family")
+    manifest, host = found
+    result = await _call_plugin_host(
+        http_request,
+        host,
+        "create_artifact",
+        scope_id=scope_id,
+        payload={"artifact_id": uuid4().hex, "content": request.content},
+        timeout=manifest.spec.change_timeout_seconds,
+        operation=CREATE_ARTIFACT.operation_id,
+    )
+    created = await application.records.for_scope(scope_id).get_artifact(
+        request.family, result["artifact"]["ref"]["artifact_id"]
+    )
+    response.headers["Location"] = _artifact_location(created)
+    response.headers["ETag"] = _artifact_etag(created.revision)
+    return _artifact_created_response(created)
+
+
 async def call_plugin_api(name: str, path: str, http_request: Request) -> Response:  # noqa: C901 - one route from match to response
     """Mount every plugin route under ``/v1/plugins/{name}/api``; the host authorizes and handles it."""
 
@@ -3518,10 +3587,15 @@ async def call_plugin_api(name: str, path: str, http_request: Request) -> Respon
     else:
         raise BaseValueNotFoundError("plugin_route", f"{http_request.method} {target}")
     body: Any = None
-    limit = http_request.app.state.plugin_api_max_body_bytes
+    ceiling = http_request.app.state.plugin_api_max_body_bytes
     if route.body != "none":
+        default = PLUGIN_API_JSON_BODY_BYTES if route.body == "json" else ceiling
+        limit = min(route.max_body_bytes or default, ceiling)
+        declared = http_request.headers.get("content-length", "")
+        if declared.isdecimal() and int(declared) > limit:
+            raise PluginCallError(413, "request_too_large", "The request body is too large.")
         raw = await http_request.body()
-        if len(raw) > (1024 * 1024 if route.body == "json" else limit):
+        if len(raw) > limit:
             raise PluginCallError(413, "request_too_large", "The request body is too large.")
         if route.body == "json":
             try:
@@ -3550,7 +3624,7 @@ async def call_plugin_api(name: str, path: str, http_request: Request) -> Respon
         return Response(status_code=status.HTTP_204_NO_CONTENT)
     if kind == "binary":
         _, content, content_type, filename = result
-        if len(content) > limit:
+        if len(content) > ceiling:
             raise PluginCallError(500, "plugin_error", "The plugin response is too large.")
         headers = {} if filename is None else {"Content-Disposition": f'attachment; filename="{filename}"'}
         return Response(content=content, media_type=content_type, headers=headers)
@@ -3613,10 +3687,10 @@ def _artifact_revision_response(value: RuntimeArtifactRecord) -> ArtifactRevisio
     )
 
 
-def _artifact_created_response(value: RuntimeArtifactCreated) -> ArtifactCreated:
+def _artifact_created_response(value: RuntimeArtifactCreated | RuntimeArtifactRecord) -> ArtifactCreated:
     return ArtifactCreated(
         scope_id=value.scope_id,
-        family=BaseArtifactFamily(value.family),
+        family=ArtifactReadFamily(value.family),
         artifact_id=value.artifact_id,
         revision=value.revision,
         sources=[mapping.source_type_reference(ref) for ref in value.sources],
@@ -3645,7 +3719,7 @@ def _artifact_collection_item_response(value: RuntimeArtifactCollectionItem) -> 
     )
 
 
-def _artifact_write(value: CreateArtifactRequest | ReplaceArtifactRequest) -> RuntimeArtifactWrite:
+def _artifact_write(value: CreateBuiltinArtifactRequest | ReplaceArtifactRequest) -> RuntimeArtifactWrite:
     root = value.root
     if isinstance(root, ReplacePluginArtifactRequest):
         raise InvalidBaseAccessRequestError("content", "does not match a built-in Artifact contract")
@@ -3672,7 +3746,7 @@ def _source_location(value: RuntimeSourceRecord) -> str:
     return f"/v1/scopes/{scope_id}/sources/{source_type}/{source_id}"
 
 
-def _artifact_location(value: RuntimeArtifactCreated) -> str:
+def _artifact_location(value: RuntimeArtifactCreated | RuntimeArtifactRecord) -> str:
     artifact_id = quote(value.artifact_id, safe="")
     scope_id = quote(value.scope_id, safe="")
     family = quote(value.family, safe="")

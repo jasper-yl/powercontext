@@ -394,6 +394,7 @@ def create_server_app(  # noqa: C901
             gateway = await _source_gateway(runtime, resolved)
             await resources.enter_async_context(gateway)
             app.state.source_gateway = gateway
+            app.state.plugin_api_max_body_bytes = resolved.plugin_api_max_body_bytes
             app.state.application = runtime
             app.state.dashboard_runtime = runtime
             app.state.access_control = active_access_control
@@ -485,6 +486,7 @@ def create_server_app(  # noqa: C901
         HttpResourceLimitsMiddleware,
         max_request_body_bytes=resolved.http.max_request_body_bytes,
         max_concurrent_requests=resolved.http.max_concurrent_requests,
+        plugin_api_max_body_bytes=resolved.plugin_api_max_body_bytes,
     )
     app.add_middleware(HttpRequestIdMiddleware)
     if metrics is not None:

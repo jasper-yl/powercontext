@@ -4752,7 +4752,12 @@ OPENAPI_SCHEMA: dict[str, JsonValue] = {
                 "description": "Persist one Source without "
                 "synchronously deriving "
                 "Artifacts. The Server "
-                "generates source_id.",
+                "generates source_id. A "
+                "Source type defined by a "
+                "loaded plugin is resolved by "
+                "that plugin from the "
+                "submitted input; unknown "
+                "types return 404.",
                 "operationId": "create_source",
                 "x-powercontext-access": {
                     "action": "scope.contribute",
@@ -4858,7 +4863,14 @@ OPENAPI_SCHEMA: dict[str, JsonValue] = {
                 "head, chunks, and "
                 "configured retrieval "
                 "indexes are committed "
-                "atomically.",
+                "atomically. A family "
+                "provided by a loaded "
+                "plugin takes the complete "
+                "content object; core "
+                "allocates the Artifact ID "
+                "and the plugin's "
+                "create_artifact method "
+                "writes revision one.",
                 "operationId": "create_artifact",
                 "x-powercontext-access": {"resolver": "create_artifact_access"},
                 "parameters": [
@@ -7597,7 +7609,7 @@ OPENAPI_SCHEMA: dict[str, JsonValue] = {
             "ArtifactCreated": {
                 "properties": {
                     "scope_id": {"type": "string", "maxLength": 256, "minLength": 1, "pattern": ".*\\S.*"},
-                    "family": {"$ref": "#/components/schemas/BaseArtifactFamily"},
+                    "family": {"$ref": "#/components/schemas/ArtifactReadFamily"},
                     "artifact_id": {"type": "string", "maxLength": 128, "minLength": 1, "pattern": "^[\\x21-\\x7E]+$"},
                     "revision": {"type": "integer", "minimum": 1.0},
                     "sources": {"items": {"$ref": "#/components/schemas/SourceTypeReference"}, "type": "array"},
@@ -8591,6 +8603,24 @@ OPENAPI_SCHEMA: dict[str, JsonValue] = {
                 "additionalProperties": False,
                 "type": "object",
                 "required": ["changed", "restored", "retired", "undo_merge_results"],
+            },
+            "CreatePluginArtifactRequest": {
+                "properties": {
+                    "family": {"type": "string", "maxLength": 128, "minLength": 1, "pattern": "^[a-z][a-z0-9-]*$"},
+                    "content": {"additionalProperties": True, "type": "object"},
+                },
+                "additionalProperties": False,
+                "type": "object",
+                "required": ["family", "content"],
+                "description": "Create an Artifact of "
+                "a family a loaded "
+                "plugin provides. The "
+                "family must not be a "
+                "built-in family name; "
+                "core allocates the "
+                "Artifact ID and stores "
+                "the content the plugin "
+                "writes.",
             },
             "ReplacePluginArtifactRequest": {
                 "properties": {"content": {"additionalProperties": True, "type": "object"}},
@@ -13103,6 +13133,23 @@ OPENAPI_SCHEMA: dict[str, JsonValue] = {
             },
             "CreateArtifactRequest": {
                 "oneOf": [
+                    {"$ref": "#/components/schemas/CreateBuiltinArtifactRequest"},
+                    {"$ref": "#/components/schemas/CreatePluginArtifactRequest"},
+                ],
+                "description": "A built-in family's creation "
+                "request, or the complete "
+                "content of an Artifact in a "
+                "loaded plugin's family. The "
+                "family name selects the "
+                "branch: built-in names "
+                "select the built-in branch.",
+                "x-powercontext-family-dispatch": {
+                    "builtin": "CreateBuiltinArtifactRequest",
+                    "plugin": "CreatePluginArtifactRequest",
+                },
+            },
+            "CreateBuiltinArtifactRequest": {
+                "oneOf": [
                     {"$ref": "#/components/schemas/CreateAtomicMemoryArtifactRequest"},
                     {"$ref": "#/components/schemas/CreateTopicMemoryArtifactRequest"},
                     {"$ref": "#/components/schemas/CreateMemoryArtifactRequest"},
@@ -13280,9 +13327,49 @@ OPENAPI_SCHEMA: dict[str, JsonValue] = {
                 "type": "object",
                 "required": ["kind", "text"],
             },
+            "SourceType": {
+                "type": "string",
+                "enum": ["content"],
+                "description": "The built-in Source type that create_source accepts.",
+            },
             "CreateSourceRequest": {
                 "properties": {
-                    "source_type": {"type": "string", "enum": ["content"], "default": "content"},
+                    "source_type": {
+                        "type": "string",
+                        "maxLength": 128,
+                        "minLength": 1,
+                        "pattern": "^[a-z][a-z0-9._-]*$",
+                        "description": "The "
+                        "built-in "
+                        "content "
+                        "type, "
+                        "or "
+                        "a "
+                        "Source "
+                        "type "
+                        "that "
+                        "a "
+                        "loaded "
+                        "plugin "
+                        "defines. "
+                        "A "
+                        "plugin "
+                        "type's "
+                        "content "
+                        "is "
+                        "that "
+                        "type's "
+                        "input; "
+                        "the "
+                        "plugin "
+                        "resolves "
+                        "it "
+                        "into "
+                        "the "
+                        "stored "
+                        "Source.",
+                        "default": "content",
+                    },
                     "content": {
                         "description": "JSON "
                         "value "
@@ -13292,7 +13379,15 @@ OPENAPI_SCHEMA: dict[str, JsonValue] = {
                         "built-in "
                         "content "
                         "Source "
-                        "adapter. "
+                        "adapter, "
+                        "or "
+                        "the "
+                        "input "
+                        "of "
+                        "a "
+                        "plugin "
+                        "Source "
+                        "type. "
                         "Server-reserved "
                         "payload "
                         "schemas, "

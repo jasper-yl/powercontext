@@ -2156,7 +2156,7 @@ export interface paths {
         put?: never;
         /**
          * Create a durable Source
-         * @description Persist one Source without synchronously deriving Artifacts. The Server generates source_id.
+         * @description Persist one Source without synchronously deriving Artifacts. The Server generates source_id. A Source type defined by a loaded plugin is resolved by that plugin from the submitted input; unknown types return 404.
          */
         post: operations["create_source"];
         delete?: never;
@@ -2193,7 +2193,7 @@ export interface paths {
         put?: never;
         /**
          * Create an Artifact
-         * @description Dispatch the family-specific creation command through the owning Family writer and atomically create revision one, its derived Family state, and its system provenance Source. Handoff is the Scope singleton: Create returns 409 when it already exists and callers must use Replace to update it. Creating a Prompt requires scope.admin because its configuration affects the whole Scope; other families require scope.contribute. Topic Memory accepts complete title, summary, and detail text without semantic generation; its active head, chunks, and configured retrieval indexes are committed atomically.
+         * @description Dispatch the family-specific creation command through the owning Family writer and atomically create revision one, its derived Family state, and its system provenance Source. Handoff is the Scope singleton: Create returns 409 when it already exists and callers must use Replace to update it. Creating a Prompt requires scope.admin because its configuration affects the whole Scope; other families require scope.contribute. Topic Memory accepts complete title, summary, and detail text without semantic generation; its active head, chunks, and configured retrieval indexes are committed atomically. A family provided by a loaded plugin takes the complete content object; core allocates the Artifact ID and the plugin's create_artifact method writes revision one.
          */
         post: operations["create_artifact"];
         delete?: never;
@@ -3172,7 +3172,7 @@ export interface components {
         };
         ArtifactCreated: {
             scope_id: string;
-            family: components["schemas"]["BaseArtifactFamily"];
+            family: components["schemas"]["ArtifactReadFamily"];
             artifact_id: string;
             revision: number;
             sources: components["schemas"]["SourceTypeReference"][];
@@ -3628,6 +3628,13 @@ export interface components {
             restored: components["schemas"]["ArtifactReference"][];
             retired: components["schemas"]["ArtifactReference"][];
             undo_merge_results: string[];
+        };
+        /** @description Create an Artifact of a family a loaded plugin provides. The family must not be a built-in family name; core allocates the Artifact ID and stores the content the plugin writes. */
+        CreatePluginArtifactRequest: {
+            family: string;
+            content: {
+                [key: string]: unknown;
+            };
         };
         /** @description Complete content of a plugin Artifact; core stores it unchanged and indexes the declared fields. */
         ReplacePluginArtifactRequest: {
@@ -5416,7 +5423,9 @@ export interface components {
             detail: string;
             source_refs: components["schemas"]["SourceReference"][];
         };
-        CreateArtifactRequest: components["schemas"]["CreateAtomicMemoryArtifactRequest"] | components["schemas"]["CreateTopicMemoryArtifactRequest"] | components["schemas"]["CreateMemoryArtifactRequest"] | components["schemas"]["CreateExperienceArtifactRequest"] | components["schemas"]["CreateSkillArtifactRequest"] | components["schemas"]["CreateHandoffArtifactRequest"] | components["schemas"]["CreatePromptArtifactRequest"] | components["schemas"]["CreateProfileArtifactRequest"];
+        /** @description A built-in family's creation request, or the complete content of an Artifact in a loaded plugin's family. The family name selects the branch: built-in names select the built-in branch. */
+        CreateArtifactRequest: components["schemas"]["CreateBuiltinArtifactRequest"] | components["schemas"]["CreatePluginArtifactRequest"];
+        CreateBuiltinArtifactRequest: components["schemas"]["CreateAtomicMemoryArtifactRequest"] | components["schemas"]["CreateTopicMemoryArtifactRequest"] | components["schemas"]["CreateMemoryArtifactRequest"] | components["schemas"]["CreateExperienceArtifactRequest"] | components["schemas"]["CreateSkillArtifactRequest"] | components["schemas"]["CreateHandoffArtifactRequest"] | components["schemas"]["CreatePromptArtifactRequest"] | components["schemas"]["CreateProfileArtifactRequest"];
         TopicMemoryWriteContent: {
             title: string;
             summary: string;
@@ -5485,13 +5494,18 @@ export interface components {
             /** @description Durable non-empty Memory entry text used to create the Entry Version and search projection. */
             text: string;
         };
+        /**
+         * @description The built-in Source type that create_source accepts.
+         * @enum {string}
+         */
+        SourceType: "content";
         CreateSourceRequest: {
             /**
+             * @description The built-in content type, or a Source type that a loaded plugin defines. A plugin type's content is that type's input; the plugin resolves it into the stored Source.
              * @default content
-             * @enum {string}
              */
-            source_type: "content";
-            /** @description JSON value persisted by the built-in content Source adapter. Server-reserved payload schemas, including handoff receipts, are rejected and must be created through their dedicated workflow. String values that are empty or whitespace-only are rejected. */
+            source_type: string;
+            /** @description JSON value persisted by the built-in content Source adapter, or the input of a plugin Source type. Server-reserved payload schemas, including handoff receipts, are rejected and must be created through their dedicated workflow. String values that are empty or whitespace-only are rejected. */
             content: unknown;
         };
         /** @description A built-in Family or a loaded plugin family; every readable Family supports logical tags on persisted Artifacts. The collection-level memory Family tags entries instead. */

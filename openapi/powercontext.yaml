@@ -4300,7 +4300,9 @@ paths:
     post:
       tags: [sources]
       summary: Create a durable Source
-      description: Persist one Source without synchronously deriving Artifacts. The Server generates source_id.
+      description: >-
+        Persist one Source without synchronously deriving Artifacts. The Server generates source_id. A Source type
+        defined by a loaded plugin is resolved by that plugin from the submitted input; unknown types return 404.
       operationId: create_source
       x-powercontext-access: {action: scope.contribute, resource: {type: scope, scope-id-from: scope_id}}
       parameters:
@@ -4407,6 +4409,8 @@ paths:
         other families require scope.contribute.
         Topic Memory accepts complete title, summary, and detail text without semantic generation;
         its active head, chunks, and configured retrieval indexes are committed atomically.
+        A family provided by a loaded plugin takes the complete content object; core allocates the Artifact ID
+        and the plugin's create_artifact method writes revision one.
       operationId: create_artifact
       x-powercontext-access: {resolver: create_artifact_access}
       parameters:
@@ -7107,7 +7111,7 @@ components:
           maxLength: 256
           pattern: '.*\S.*'
         family:
-          $ref: "#/components/schemas/BaseArtifactFamily"
+          $ref: "#/components/schemas/ArtifactReadFamily"
         artifact_id:
           type: string
           minLength: 1
@@ -8252,6 +8256,16 @@ components:
         restored: {type: array, items: {$ref: '#/components/schemas/ArtifactReference'}}
         retired: {type: array, items: {$ref: '#/components/schemas/ArtifactReference'}}
         undo_merge_results: {type: array, items: {type: string}}
+    CreatePluginArtifactRequest:
+      type: object
+      additionalProperties: false
+      required: [family, content]
+      description: >-
+        Create an Artifact of a family a loaded plugin provides. The family must not be a built-in family name;
+        core allocates the Artifact ID and stores the content the plugin writes.
+      properties:
+        family: {type: string, minLength: 1, maxLength: 128, pattern: '^[a-z][a-z0-9-]*$'}
+        content: {type: object, additionalProperties: true}
     ReplacePluginArtifactRequest:
       type: object
       additionalProperties: false
@@ -12739,6 +12753,14 @@ components:
           items:
             $ref: "#/components/schemas/SourceReference"
     CreateArtifactRequest:
+      description: >-
+        A built-in family's creation request, or the complete content of an Artifact in a loaded plugin's family.
+        The family name selects the branch: built-in names select the built-in branch.
+      x-powercontext-family-dispatch: {builtin: CreateBuiltinArtifactRequest, plugin: CreatePluginArtifactRequest}
+      oneOf:
+        - $ref: "#/components/schemas/CreateBuiltinArtifactRequest"
+        - $ref: "#/components/schemas/CreatePluginArtifactRequest"
+    CreateBuiltinArtifactRequest:
       oneOf:
         - $ref: "#/components/schemas/CreateAtomicMemoryArtifactRequest"
         - $ref: "#/components/schemas/CreateTopicMemoryArtifactRequest"
@@ -12864,6 +12886,10 @@ components:
           maxLength: 8192
           pattern: '.*\S.*'
           description: Durable non-empty Memory entry text used to create the Entry Version and search projection.
+    SourceType:
+      type: string
+      description: The built-in Source type that create_source accepts.
+      enum: [content]
     CreateSourceRequest:
       type: object
       additionalProperties: false
@@ -12871,13 +12897,18 @@ components:
       properties:
         source_type:
           type: string
-          enum: [content]
+          description: >-
+            The built-in content type, or a Source type that a loaded plugin defines. A plugin type's content is
+            that type's input; the plugin resolves it into the stored Source.
+          minLength: 1
+          maxLength: 128
+          pattern: '^[a-z][a-z0-9._-]*$'
           default: content
         content:
           description: >-
-            JSON value persisted by the built-in content Source adapter. Server-reserved payload schemas, including
-            handoff receipts, are rejected and must be created through their dedicated workflow. String values that are
-            empty or whitespace-only are rejected.
+            JSON value persisted by the built-in content Source adapter, or the input of a plugin Source type.
+            Server-reserved payload schemas, including handoff receipts, are rejected and must be created through
+            their dedicated workflow. String values that are empty or whitespace-only are rejected.
     TaggableArtifactFamily:
       type: string
       description: >-
