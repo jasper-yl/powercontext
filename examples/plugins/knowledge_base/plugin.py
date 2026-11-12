@@ -634,10 +634,12 @@ class KnowledgeBasePlugin:
             status: DocumentStatus | None = None
             if submission["source_id"] is None:
                 status = "pending_config"
-            elif submission["processed_at"] is None or await reads.get(identity) is None:
-                # Generation marks a submission before its commit, so a new document has no
-                # Artifact for a moment; it is still processing, not gone.
-                status = "processing"
+            elif submission["processed_at"] is None:
+                # Generation marks a submission after its commit; until then the submission is
+                # done only if the current revision already came from it.
+                snapshot = await reads.get(identity)
+                if snapshot is None or snapshot.content.get("submission_id") != submission["submission_id"]:
+                    status = "processing"
             if status is not None:
                 current = documents.get(identity)
                 documents[identity] = Document.model_validate({
@@ -891,12 +893,6 @@ class KnowledgeBasePlugin:
                 indexed = await self._indexed(request.scope_id, [set_id])
                 content = content.model_copy(update={"chunk_set": set_id, "chunk_count": len(indexed)})
             planned.append((document_id(upload.knowledge_base_id, upload.name), content, source.ref))
-        # Marked before the commit: if the commit fails, core delivers the Sources again and
-        # this runs again, so the mark is at worst briefly ahead of the document.
-        await self.store.mark_processed(
-            request.scope_id,
-            [item.edit_id if isinstance(item, ChunkEditRecord) else item.submission_id for _, item, _ in planned],
-        )
         async with writer.transaction() as tx:
             for identity, item, ref in planned:
                 if isinstance(item, DocumentContent):
@@ -915,6 +911,13 @@ class KnowledgeBasePlugin:
                     }
                 )
                 await tx.put(identity, content=edited.model_dump(mode="json"), source_refs=[ref])
+        # Marked only after the commit, so a document never looks done before its revision exists.
+        # A crash right after the commit leaves the mark unset; the listing then recognizes the
+        # submission from the revision it produced.
+        await self.store.mark_processed(
+            request.scope_id,
+            [item.edit_id if isinstance(item, ChunkEditRecord) else item.submission_id for _, item, _ in planned],
+        )
 
     async def _parsed(self, scope_id: str, upload: DocumentUpload) -> str:
         """The chunk set of a file under a parser profile; the same file and settings are parsed once."""
