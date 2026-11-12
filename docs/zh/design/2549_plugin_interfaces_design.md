@@ -145,7 +145,7 @@ Scope 写入调用意图。
 Worker 收到 (plugin:<name>, scope_id, request_generation)
   -> 短事务：ScopeInvocation.start；读取 pc_source_cursors 中 (scope_id, plugin:<name>) 的游标
      -> 读取 journal 高水位，确定窗口 (after, through]，through ≤ after + max_sources
-     -> list_window_for_generation 读取窗口，按 inputs.source_types 过滤，计算 inputs.projection
+     -> list_window_for_generation 读取窗口，按 inputs.source_types 过滤，按每条 Source 的类型计算对应的 Projection（inputs.projections 中的类型专用值，否则为 inputs.projection）
   -> 窗口为空且配置了 inputs：短事务完成游标 CAS 与 acknowledge，不加载插件
   -> 核对代码指纹，导入 plugin.py，核对声明，调用 create，创建写入器，调用 generate（受 timeout_seconds 约束）
      -> 事务外读取：独立只读短事务，记录读到的 revision（§5.3）

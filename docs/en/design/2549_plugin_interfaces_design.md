@@ -156,7 +156,7 @@ Instances in the `api` role register only families and Source types, not binding
 Worker receives (plugin:<name>, scope_id, request_generation)
   -> short transaction: ScopeInvocation.start; read the cursor for (scope_id, plugin:<name>) from pc_source_cursors
      -> read the journal high-water mark and fix the window (after, through], through ≤ after + max_sources
-     -> list_window_for_generation reads the window, filters by inputs.source_types, computes inputs.projection
+     -> list_window_for_generation reads the window, filters by inputs.source_types, computes each Source's Projection for its type (the type's entry in inputs.projections, else inputs.projection)
   -> empty window with inputs configured: a short transaction performs the cursor CAS and acknowledge without loading the plugin
   -> check the code fingerprint, import plugin.py, verify the declaration, call create, build the writer, call generate
      (bounded by timeout_seconds)
