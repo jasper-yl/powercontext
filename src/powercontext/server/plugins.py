@@ -220,11 +220,9 @@ class PluginManager:
                     storage_root=self.storage_root,
                 ),
             )
-            # Routes and Source Definitions serve requests from the start; plugins with only
-            # user-change methods start their host on the first change.
-            if manifest.spec.api is not None or manifest.source_manifests:
-                task = asyncio.create_task(self._start_host(plugin.host), name=f"plugin-host-start-{plugin.name}")
-                plugin.tasks.append(task)
+            # Every loaded plugin's host starts now, so the first request does not wait for a spawn.
+            task = asyncio.create_task(self._start_host(plugin.host), name=f"plugin-host-start-{plugin.name}")
+            plugin.tasks.append(task)
 
     @staticmethod
     async def _start_host(host: PluginHost) -> None:
