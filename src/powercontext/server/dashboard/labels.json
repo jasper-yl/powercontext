@@ -315,5 +315,7 @@
   "review_effect_tag": "批准时同时校验标签 ETag 和内容版本；只替换标签，不产生制品版本。",
   "review_history": "候选版本与决定记录",
   "review_unavailable": "证据不可用；批准时会重新检查。",
-  "review_target_unavailable": "目标内容暂不可用，无法显示完整差异。"
+  "review_target_unavailable": "目标内容暂不可用，无法显示完整差异。",
+  "plugin": "插件",
+  "plugin_page_stopped": "插件页面已离开起始页，已停止为它转发请求。重新打开页面后继续使用。"
 }
