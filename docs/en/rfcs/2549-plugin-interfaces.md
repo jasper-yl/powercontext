@@ -389,6 +389,7 @@ requires.
 | `transaction_timeout_seconds` | 30 | Time limit for the write transaction block, at most `timeout_seconds` |
 | `max_workers` | 1 | Concurrency limit across Scopes |
 | `change_timeout_seconds` | 30 | Time limit for one user-change call, including its write transaction block |
+| `definitions` | `()` | The plugin's own Source Definitions, registered when the plugin loads, under the same rules as a Source plugin's `definitions`. The plugin submits them from its routes with `ctx.sources.submit`, and callers can also submit them through the generic Source write API, so one Artifact plugin can record what users asked for without a separate Source plugin |
 | `create` | Required | See the table above |
 
 ### 4.3 Example
@@ -587,10 +588,17 @@ class PluginStorage(Protocol):
     backend: Literal["sqlite", "oceanbase", "seekdb"]
     def engine(self) -> AsyncEngine: ...   # points only to this plugin's dedicated area
 
+class ChatMessage(BaseModel):
+    role: Literal["system", "user", "assistant"]
+    content: str
+
 class PluginModels(Protocol):
-    embedding_profile: EmbeddingProfile | None    # profile ID and vector dimension; None without an embedding model
+    embedding_available: bool                    # whether Server has an embedding model
+    embedding_dimension: int | None              # vector dimension; None without an embedding model
+    generation_available: bool                   # whether Server has a generation model
     async def embed(self, texts: Sequence[str], /) -> Sequence[Sequence[float]]: ...
     async def generate(self, messages: Sequence[ChatMessage], /, *, max_tokens: int | None = None) -> str: ...
+    # Calling a model Server lacks raises ModelUnavailable; synchronous calls return 503
 ```
 
 - The factory runs once per Worker invocation, and instances are not reused across invocations; in the host process it
@@ -611,7 +619,10 @@ class PluginModels(Protocol):
   - The plugin and Server use the same database login, so this split prevents a plugin from writing core's tables by
     mistake but does not stop a malicious plugin; the plugin directory is treated as trusted code.
 - **Models**: `models` wraps Server's inference configuration; the plugin never sees model addresses, headers, or
-  credentials. `embedding_profile` lets the plugin use the same embedding configuration for indexing and queries. Calls
+  credentials. `models` is None when Server configures neither model; when only one is configured, the plugin checks
+  `embedding_available` and `generation_available`. Plugins should record the embedding configuration, such as
+  `embedding_dimension`, with their indexes and rebuild them when it changes, so vectors from different models are never
+  compared. Calls
   follow Server's timeout settings and count toward the existing model usage statistics. A plugin may also read its own
   model configuration from environment variables and create its own clients.
 - Plugins get no connection to core's database and no interface for writing cursors or checkpoints. Plugins write core
@@ -988,8 +999,10 @@ class InvalidContent(Exception):          # the plugin rejects the content; the 
 | The plugin did not perform the required write | 502 |
 | `change_timeout_seconds` is exceeded, or the host process is unavailable or in restart backoff | 503 |
 
-- The plugin branch of the create request has no discriminator mapping: OpenAPI cannot map arbitrary plugin families, so
-  generated clients type this branch loosely. This matches the tag APIs, whose family became a string.
+- The plugin branch of the create request has no discriminator mapping: OpenAPI cannot map arbitrary plugin families. The
+  built-in branch keeps its discrimination by family, the plugin branch sits beside it, and the family name selects the
+  branch, so a built-in family's request is never accepted by the plugin branch. This matches the tag APIs, whose family
+  became a string.
 - A need that only means removal (for example, taking down a document) uses forget; core provides no physical delete. In
   `forget_artifact` the plugin can clean the body and indexes out of its own storage, while the revisions and Sources in
   core are kept.
@@ -1032,9 +1045,10 @@ long-lived host process:
 | `create_artifact`, `update_artifact`, `merge_artifacts`, `forget_artifact`, `restore_artifact` | Host process |
 | `collect`, `generate` | Supervisor Worker |
 
-- **Count and startup**: each Server process keeps at most one host process for each plugin that needs synchronous calls,
-  starts it in the background once the plugin loads, and reuses it afterward. An Artifact plugin that provides only `generate`
-  starts no host process. In edge mode, `resolve` and Projections run inside the collection Worker, and no host process
+- **Count and startup**: each Server process keeps at most one host process for each loaded plugin, starts it in the
+  background once the plugin loads, and reuses it afterward. Whether a plugin implements user-change methods is known only
+  after `create` runs, so an Artifact plugin that provides only `generate` also starts one, at the cost of an idle process.
+  In edge mode, `resolve` and Projections run inside the collection Worker, and no host process
   starts.
 - **Execution**: the host process imports `plugin.py` once at startup and compares the declaration, and the writer runs
   inside the host process. One host process can serve several requests concurrently, up to a limit set in the Server
@@ -1151,7 +1165,8 @@ ranges added and removed.
 | Removed | Custom family declarative indexes (`ArtifactSearchDeclaration`, `TextIndex`, and so on), `ArtifactFamily` schema declarations, `ArtifactDraft`, and the old Worker plugin executor |
 | Added | `powercontext.plugins`: `SourcePlugin`, `ArtifactPlugin`, `Inputs`, `Interval`, `Cron`, `PluginContext`, `PluginStorage`, `PluginModels`, the writer and read interfaces, and the user-change request models and `InvalidContent` |
 | Added | The `powercontext source-agent` edge collection mode, with `POWERCONTEXT_SOURCE_AGENT_ID` and `POWERCONTEXT_SOURCE_AGENT_TOKEN` |
-| Changed | The body of `POST /v1/scopes/{scope_id}/artifacts` gains a plugin branch `{"family", "content"}`; core allocates the ID, and the plugin's `create_artifact` handles it |
+| Changed | The body of `POST /v1/scopes/{scope_id}/artifacts` gains a plugin branch `{"family", "content"}`; core allocates the ID, and the plugin's `create_artifact` handles it. `CreateArtifactRequest` becomes a choice between the built-in branch `CreateBuiltinArtifactRequest` (the former union discriminated by family) and the plugin branch `CreatePluginArtifactRequest`, selected by family name: built-in names take the built-in branch with unchanged validation; other names take the plugin branch, and a family no plugin provides returns 422. In the generated Python client, built-in requests gain one wrapping level, and `ArtifactCreated.family` changes from the built-in family enum to a string |
+| Changed | The `source_type` of `POST /v1/scopes/{scope_id}/sources` changes from an enum allowing only `content` to a string (still defaulting to `content`). It may name a Source type a plugin defines; `content` is then that type's input, which the plugin validates and resolves into a Source. Unknown types return 404. The `SourceType` enum remains |
 | Added | `GET /v1/plugins`, `GET /v1/plugins/{name}`, `GET /v1/plugins/{name}/scopes` (`server.admin`, read-only) |
 | Added | `GET .../{artifact_id}/governance`, `POST /v1/scopes/{scope_id}/artifacts/{family}/merges`, `POST .../{artifact_id}/forget`, `POST .../{artifact_id}/restorations`: generic APIs on the shared merge engine registry that work for every registered family (Experience and Atomic Memory among built-ins, plus loaded plugin families, which the matching plugin methods handle). Atomic Memory's dedicated APIs are unchanged |
 | Changed | `PUT /v1/scopes/{scope_id}/artifacts/{family}/{artifact_id}` accepts plugin families with a `{"content": {...}}` body, handled by the plugin's `update_artifact` |

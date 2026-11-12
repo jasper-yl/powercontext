@@ -343,6 +343,7 @@ powercontext source-agent --server https://memory.example.com
 | `transaction_timeout_seconds` | 30 | 写事务块的时限，不超过 `timeout_seconds` |
 | `max_workers` | 1 | 跨 Scope 的并发上限 |
 | `change_timeout_seconds` | 30 | 一次用户修改调用的时限，包括其中的写事务块 |
+| `definitions` | `()` | 插件自己的 Source 定义，随插件加载登记，规则与 Source 插件的 `definitions` 相同。插件在接口中用 `ctx.sources.submit` 提交，调用方也可以经通用 Source 写入接口提交；这样一个 Artifact 插件就能记录"用户要求做什么"，不需要另写一个 Source 插件 |
 | `create` | 必填 | 见上表 |
 
 ### 4.3 示例
@@ -524,10 +525,17 @@ class PluginStorage(Protocol):
     backend: Literal["sqlite", "oceanbase", "seekdb"]
     def engine(self) -> AsyncEngine: ...   # 只指向本插件的专属空间
 
+class ChatMessage(BaseModel):
+    role: Literal["system", "user", "assistant"]
+    content: str
+
 class PluginModels(Protocol):
-    embedding_profile: EmbeddingProfile | None    # profile ID 与向量维度；未配置 embedding 时为 None
+    embedding_available: bool                    # Server 是否配置了 embedding 模型
+    embedding_dimension: int | None              # 向量维度；未配置时为 None
+    generation_available: bool                   # Server 是否配置了生成模型
     async def embed(self, texts: Sequence[str], /) -> Sequence[Sequence[float]]: ...
     async def generate(self, messages: Sequence[ChatMessage], /, *, max_tokens: int | None = None) -> str: ...
+    # 调用未配置的模型时抛出 ModelUnavailable；同步调用中返回 503
 ```
 
 - 工厂在每次 Worker 调用中执行一次，实例不跨调用复用；在宿主进程中只执行一次，实例服务所有 Scope 的请求，在宿主进程
@@ -541,8 +549,9 @@ class PluginModels(Protocol):
   - 这块空间属于整个插件，不按 Scope 隔离。插件按 `scope_id` 划分自己的数据，并在读取时自行确认数据属于本次请求的 Scope，
     不能只凭调用方给出的 ID 返回数据。
   - 插件与 Server 使用同一个数据库登录，这一划分防止插件误写 core 的表，不防止恶意插件；插件目录本身被当作可信代码。
-- **模型**：`models` 封装 Server 的推理配置，插件拿不到模型的地址、请求头和凭据。`embedding_profile` 让插件在索引和查询时
-  使用同一个 embedding 配置。调用沿用 Server 的超时设置，并计入现有的模型用量统计。插件也可以从环境变量读取自己的
+- **模型**：`models` 封装 Server 的推理配置，插件拿不到模型的地址、请求头和凭据。Server 两种模型都没有配置时 `models`
+  为 None；只配置了其中一种时，插件用 `embedding_available`、`generation_available` 判断。插件应把 `embedding_dimension`
+  等 embedding 配置记在自己的索引上，配置变化后重建，避免把不同模型的向量混在一起比较。调用沿用 Server 的超时设置，并计入现有的模型用量统计。插件也可以从环境变量读取自己的
   模型配置，自行创建客户端。
 - 插件得不到 core 数据库的连接，也没有游标或 checkpoint 的写入接口。插件对核心数据的写入只有三条路径：Source 插件的
   `collect` 返回值、宿主进程中 `resolve` 的返回值，和 Artifact 插件的 `ArtifactWriter`。
@@ -861,8 +870,8 @@ class InvalidContent(Exception):          # 插件拒绝内容；接口返回 42
 | 插件没有完成要求的写操作 | 502 |
 | 超过 `change_timeout_seconds`、宿主进程不可用或处于重启退避 | 503 |
 
-- 新建请求的插件分支没有判别映射：OpenAPI 无法为任意插件 family 写映射，生成的客户端对这一分支的类型约束较弱。这与
-  tags 接口把 family 改为字符串的处理相同。
+- 新建请求的插件分支没有判别映射：OpenAPI 无法为任意插件 family 写映射。内置分支保留原来按 family 的判别，插件分支与它
+  并列，由 family 名决定走哪个分支，内置 family 的请求不会被插件分支接受。这与 tags 接口把 family 改为字符串的处理相同。
 - 只有删除语义的需求（例如撤下一份文档）使用遗忘；core 不提供物理删除。插件可以在 `forget_artifact` 中清理自己存储中的
   正文和索引，core 中的 revision 与 Source 保留。
 - **并发**：用户修改与后台的 `generate` 可能同时发生。`generate` 对事务外读过的 Artifact 写入时，core 按读到的 revision
@@ -895,8 +904,9 @@ collect 的结构相同：输入换成该 Scope 的已启用目标及其 checkpo
 | `create_artifact`、`update_artifact`、`merge_artifacts`、`forget_artifact`、`restore_artifact` | 宿主进程 |
 | `collect`、`generate` | Supervisor Worker |
 
-- **数量与启动**：每个 Server 进程为每个需要同步调用的插件维护至多一个宿主进程，插件加载后在后台启动，之后复用。
-  只提供 `generate` 的 Artifact 插件不启动宿主进程。端侧模式中，`resolve` 和 Projection 在采集 Worker 内执行，不启动宿主进程。
+- **数量与启动**：每个 Server 进程为每个加载的插件维护至多一个宿主进程，插件加载后在后台启动，之后复用。插件是否实现了
+  用户修改方法，要调用 `create` 之后才知道，所以只提供 `generate` 的 Artifact 插件也会启动宿主进程，代价是一个空闲的进程。
+  端侧模式中，`resolve` 和 Projection 在采集 Worker 内执行，不启动宿主进程。
 - **执行**：宿主进程启动时导入一次 `plugin.py` 并核对声明，写入器在宿主进程中执行。一个宿主进程可以并发处理多个请求，
   并发上限由 Server 配置决定。
 - **超时与故障**：每次调用受各自的时限约束（Source 写入与 `identify_target` 使用 Server 的同步调用时限，用户修改使用
@@ -987,7 +997,8 @@ collect 的结构相同：输入换成该 Scope 的已启用目标及其 checkpo
 | 移除 | 自定义 family 的声明式索引（`ArtifactSearchDeclaration`、`TextIndex` 等）、`ArtifactFamily` 的 schema 声明、`ArtifactDraft` 和旧的 Worker 插件执行器 |
 | 新增 | `powercontext.plugins`：`SourcePlugin`、`ArtifactPlugin`、`Inputs`、`Interval`、`Cron`、`PluginContext`、`PluginStorage`、`PluginModels`、写入器与读取接口、用户修改的请求模型与 `InvalidContent` |
 | 新增 | `powercontext source-agent` 端侧采集模式，以及 `POWERCONTEXT_SOURCE_AGENT_ID`、`POWERCONTEXT_SOURCE_AGENT_TOKEN` |
-| 调整 | `POST /v1/scopes/{scope_id}/artifacts` 的请求体增加插件分支 `{"family", "content"}`，ID 由 core 分配，由插件的 `create_artifact` 处理 |
+| 调整 | `POST /v1/scopes/{scope_id}/artifacts` 的请求体增加插件分支 `{"family", "content"}`，ID 由 core 分配，由插件的 `create_artifact` 处理。`CreateArtifactRequest` 改为内置分支 `CreateBuiltinArtifactRequest`（原有的按 family 区分的联合类型）与插件分支 `CreatePluginArtifactRequest` 的二选一，按 family 名选择：内置 family 名走内置分支，校验与原来相同；其他名字走插件分支，没有插件提供该 family 时返回 422。生成的 Python 客户端中，内置请求多包一层；`ArtifactCreated.family` 从内置 family 枚举改为字符串 |
+| 调整 | `POST /v1/scopes/{scope_id}/sources` 的 `source_type` 从只能是 `content` 的枚举改为字符串（默认仍为 `content`），可以是插件定义的 Source 类型，此时 `content` 是该类型的输入，由插件校验并解析为 Source；未知类型返回 404。`SourceType` 枚举保留 |
 | 新增 | `GET /v1/plugins`、`GET /v1/plugins/{name}`、`GET /v1/plugins/{name}/scopes`（`server.admin`，只读） |
 | 新增 | `GET .../{artifact_id}/governance`、`POST /v1/scopes/{scope_id}/artifacts/{family}/merges`、`POST .../{artifact_id}/forget`、`POST .../{artifact_id}/restorations`：基于共享合并引擎注册表的通用接口，对所有登记过的 family 生效（内置为 Experience 和 Atomic Memory，以及加载的插件 family；插件 family 由插件对应的方法处理）。Atomic Memory 的专用接口保持不变 |
 | 调整 | `PUT /v1/scopes/{scope_id}/artifacts/{family}/{artifact_id}` 接受插件 family，请求体为 `{"content": {...}}`，由插件的 `update_artifact` 处理 |
