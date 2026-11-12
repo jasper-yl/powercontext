@@ -42,7 +42,7 @@ limitations under the License.
       restore_previous: "恢复上一版本", save_chunks: "保存修改", add_chunk: "在下方插入", remove_chunk: "删除",
       edited: "已人工编辑", page: "第 {page} 页", chunk_meta: "第 {revision} 版 · {parser} · {count} 个切块",
       chunks_saved: "已保存为第 {revision} 版", restored: "已恢复到第 {revision} 版", reparse_started: "已提交重新解析",
-      empty_chunk: "切块不能为空", unsaved: "有未保存的修改",
+      empty_chunk: "切块不能为空", unsaved: "有未保存的修改", withdraw: "撤销上传", withdrawn: "已撤销上传",
     },
     en: {
       knowledge_bases: "Knowledge bases", new: "New", name: "Name", description: "Description", cancel: "Cancel",
@@ -73,6 +73,7 @@ limitations under the License.
       page: "page {page}", chunk_meta: "Revision {revision} · {parser} · {count} chunks",
       chunks_saved: "Saved as revision {revision}", restored: "Restored revision {revision}",
       reparse_started: "Reprocessing submitted", empty_chunk: "Chunks cannot be empty", unsaved: "You have unsaved changes",
+      withdraw: "Withdraw", withdrawn: "Upload withdrawn",
     },
   };
 
@@ -322,10 +323,11 @@ limitations under the License.
       chunks.addEventListener("click", () => openChunks(item));
       const download = element("button", { type: "button", class: "button link", disabled: !item.revision }, t.download);
       download.addEventListener("click", () => downloadDocument(item));
-      const remove = element("button", { type: "button", class: "button link danger" }, t.delete);
+      const waiting = item.status === "pending_config";
+      const remove = element("button", { type: "button", class: "button link danger" }, waiting ? t.withdraw : t.delete);
       confirmButton(remove, async () => {
         await call("DELETE", `/knowledge-bases/${encodeURIComponent(state.selected)}/documents/${encodeURIComponent(item.id)}`);
-        toast(t.deleted);
+        toast(waiting ? t.withdrawn : t.deleted);
         await loadDocuments();
       });
       return element("tr", {},

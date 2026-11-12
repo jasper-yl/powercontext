@@ -74,8 +74,8 @@ ORIGINALS = Table(
 )
 
 # Every upload and every request to (re)process a document. A submission without a source_id
-# waits for the user to choose a parser; submitting it to core records the Source's name, and
-# generation records when it handled the submission.
+# waits for the user to choose a parser and can still be cancelled, since nothing reached core;
+# submitting it records the Source's name, and generation records when it handled the submission.
 SUBMISSIONS = Table(
     "submissions",
     METADATA,
@@ -90,6 +90,7 @@ SUBMISSIONS = Table(
     Column("parser", JSON, nullable=True),
     Column("source_id", String(128), nullable=True),
     Column("processed_at", DateTime(timezone=True), nullable=True),
+    Column("cancelled_at", DateTime(timezone=True), nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False),
 )
 
@@ -219,6 +220,7 @@ class KnowledgeBaseStore:
             "source_id": None,
             "parser": None,
             "processed_at": None,
+            "cancelled_at": None,
             **values,
         }
         async with self.engine.begin() as connection:
@@ -242,11 +244,27 @@ class KnowledgeBaseStore:
                     .values(processed_at=datetime.now(UTC))
                 )
 
+    async def cancel_submission(self, scope_id: str, submission_id: str) -> None:
+        """Withdraw an upload that never reached core; submitted ones stay as Sources."""
+
+        async with self.engine.begin() as connection:
+            await connection.execute(
+                update(SUBMISSIONS)
+                .where(
+                    SUBMISSIONS.c.scope_id == scope_id,
+                    SUBMISSIONS.c.submission_id == submission_id,
+                    SUBMISSIONS.c.source_id.is_(None),
+                )
+                .values(cancelled_at=datetime.now(UTC))
+            )
+
     async def latest_submissions(self, scope_id: str) -> dict[str, dict[str, Any]]:
-        """The newest submission of every document in the knowledge base."""
+        """The newest submission of every document in the knowledge base, ignoring cancelled uploads."""
 
         rows = await self._rows(
-            select(SUBMISSIONS).where(SUBMISSIONS.c.scope_id == scope_id).order_by(SUBMISSIONS.c.created_at)
+            select(SUBMISSIONS)
+            .where(SUBMISSIONS.c.scope_id == scope_id, SUBMISSIONS.c.cancelled_at.is_(None))
+            .order_by(SUBMISSIONS.c.created_at)
         )
         return {row["document_id"]: row for row in rows}
 

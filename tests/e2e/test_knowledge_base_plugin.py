@@ -105,7 +105,11 @@ def test_knowledge_bases_hide_scopes_and_process_uploads_with_the_chosen_parser(
                 assert uploaded["status"] == "pending_config"
             await ok(await client.post(documents_path, params={"name": "slides.pdf"}, content=b"not a pdf"), 415)
             await ok(await client.post(documents_path, params={"name": "slides.docx"}, content=b"x"), 415)
+            # An upload still waiting for a parser never reached core, so it can be withdrawn.
+            mistake = await ok(await client.post(documents_path, params={"name": "wrong.md"}, content=b"oops"))
+            await ok(await client.delete(f"{documents_path}/{mistake['id']}"), 204)
             assert {item["status"] for item in (await documents(client, kb)).values()} == {"pending_config"}
+            assert "wrong.md" not in await documents(client, kb)
             assert await search(client, "keys", [kb]) == []
 
             processing = f"{API}/knowledge-bases/{kb}/processing"

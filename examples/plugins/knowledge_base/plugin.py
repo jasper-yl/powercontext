@@ -600,9 +600,17 @@ class KnowledgeBasePlugin:
         return BinaryResponse(content=content, content_type=media_type, filename=document.name)
 
     async def delete_document(self, request: ApiRequest) -> None:
+        """Withdraw an upload still waiting for a parser; otherwise forget the document."""
+
         record = await self._knowledge_base(request.path_params["kb_id"], "scope.contribute")
+        identity = request.path_params["document_id"]
+        waiting = (await self.store.latest_submissions(record["scope_id"])).get(identity)
+        if waiting is not None and waiting["source_id"] is None:
+            # Nothing reached core yet; an earlier processed revision, if any, becomes current again.
+            await self.store.cancel_submission(record["scope_id"], waiting["submission_id"])
+            return
         writer = self.ctx.writer(record["scope_id"])
-        if await writer.get(request.path_params["document_id"]) is None:
+        if await writer.get(identity) is None:
             raise ApiError(404, "document_not_found", "The document was not found.")
         async with writer.transaction() as tx:
             await tx.set_lifecycle(request.path_params["document_id"], "deprecated")
