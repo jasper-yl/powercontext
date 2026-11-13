@@ -2907,3 +2907,34 @@ uv run --no-sync python desktop/tests/real_server.py \
   --product-qualification sqlite-plugin-interfaces-15c08206-v1 \
   --wheel desktop/.artifacts/plugin-interfaces/powercontext-1.5.2.dev63+g15c082068-py3-none-any.whl
 ```
+
+
+## Server cbb50d36 plugin reload protocol qualification
+
+`sqlite-plugin-reload-cbb50d36-v1` qualifies all thirteen Desktop protocol operations against
+Server source `cbb50d368a116e2c91c2a767c2f5de33b26764a0`, which reloads plugin directories, describes
+plugin routes, and adds version fields to the plugin listing.
+
+- Normalized OpenAPI SHA-256: `b94282cdbd0a0458d0e1502983e58a6db6da929a857beafbe52c0e40b9817a55`.
+- Wheel: `powercontext-1.5.2.dev54+gcbb50d368-py3-none-any.whl`.
+- Wheel SHA-256: `8e2b0eb66c69a5784b2cd87b73e17f8750eab83aaf4222dc52eb1637432c89a6`.
+- Native debug probe SHA-256 (built without debug info): `d504dcd6704b5800346eba5bf6912f7ab9c5afdb520951a67048b2b46d2ce66c`.
+
+On 2026-11-13, Linux 7.0 x86_64 (Ubuntu 24.04, glibc 2.39) and Python 3.12.3 passed anonymous loopback,
+static Bearer, HTTPS with explicit CA/base path, and enforced Provider modes of the unchanged
+`desktop/tests/real_server.py` through the ordinary product ConnectionManager. The probe was built with
+the product Cargo lock without `ci-fixtures` and selected this bundled qualification; the client and
+qualified contract digests are identical. `bundled_product_qualification_covers_every_desktop_operation`
+passed against the same records. The wheel and report are retained under ignored
+`desktop/.artifacts/plugin-reload/` and `desktop/.artifacts/real-server.json`.
+This qualifies the observed local SQLite protocol; it does not establish installed WebView, native
+credential persistence, other operating systems, native database upgrades or release acceptance.
+
+Reproduce against the recorded artifact:
+
+```sh
+cargo build --locked --manifest-path desktop/src-tauri/Cargo.toml --example server_probe
+uv run --no-sync python desktop/tests/real_server.py \
+  --product-qualification sqlite-plugin-reload-cbb50d36-v1 \
+  --wheel desktop/.artifacts/plugin-reload/powercontext-1.5.2.dev54+gcbb50d368-py3-none-any.whl
+```
