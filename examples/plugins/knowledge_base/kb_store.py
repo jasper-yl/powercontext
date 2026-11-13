@@ -29,7 +29,7 @@ import json
 from collections.abc import Sequence
 from contextlib import suppress
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 from sqlalchemy import (
     JSON,
@@ -92,6 +92,15 @@ SUBMISSIONS = Table(
     Column("processed_at", DateTime(timezone=True), nullable=True),
     Column("cancelled_at", DateTime(timezone=True), nullable=True),
     Column("created_at", DateTime(timezone=True), nullable=False),
+)
+
+# Chunk edits that generation did not apply because the document changed after the user read it.
+DISCARDED_EDITS = Table(
+    "discarded_edits",
+    METADATA,
+    Column("scope_id", String(256), primary_key=True),
+    Column("submission_id", String(64), primary_key=True),
+    Column("discarded_at", DateTime(timezone=True), nullable=False),
 )
 
 PARSED = Table(
@@ -243,6 +252,48 @@ class KnowledgeBaseStore:
                     .where(SUBMISSIONS.c.scope_id == scope_id, SUBMISSIONS.c.submission_id.in_(tuple(submission_ids)))
                     .values(processed_at=datetime.now(UTC))
                 )
+
+    async def mark_discarded(self, scope_id: str, submission_ids: Sequence[str]) -> None:
+        if submission_ids:
+            async with self.engine.begin() as connection:
+                for submission_id in submission_ids:
+                    # Generation may run again for the same window; the first outcome stays.
+                    exists = (
+                        await connection.execute(
+                            select(DISCARDED_EDITS.c.submission_id).where(
+                                DISCARDED_EDITS.c.scope_id == scope_id, DISCARDED_EDITS.c.submission_id == submission_id
+                            )
+                        )
+                    ).first()
+                    if exists is None:
+                        await connection.execute(
+                            insert(DISCARDED_EDITS).values(
+                                scope_id=scope_id, submission_id=submission_id, discarded_at=datetime.now(UTC)
+                            )
+                        )
+
+    async def edit_status(
+        self, scope_id: str, document_id: str, submission_id: str
+    ) -> Literal["pending", "applied", "discarded"] | None:
+        """pending, applied, or discarded; None when the document has no such edit."""
+
+        rows = await self._rows(
+            select(SUBMISSIONS.c.processed_at).where(
+                SUBMISSIONS.c.scope_id == scope_id,
+                SUBMISSIONS.c.submission_id == submission_id,
+                SUBMISSIONS.c.document_id == document_id,
+            )
+        )
+        if not rows:
+            return None
+        discarded = await self._rows(
+            select(DISCARDED_EDITS.c.submission_id).where(
+                DISCARDED_EDITS.c.scope_id == scope_id, DISCARDED_EDITS.c.submission_id == submission_id
+            )
+        )
+        if discarded:
+            return "discarded"
+        return "pending" if rows[0]["processed_at"] is None else "applied"
 
     async def cancel_submission(self, scope_id: str, submission_id: str) -> None:
         """Withdraw an upload that never reached core; submitted ones stay as Sources."""

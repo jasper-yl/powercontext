@@ -255,6 +255,13 @@ class Document(BaseModel):
     edited: bool = False
     revision: int | None = None
     error: str | None = None
+    # Set on the response to a chunk edit: query it until generation applies or discards the edit.
+    edit_id: str | None = None
+
+
+class EditStatus(BaseModel):
+    edit_id: str
+    status: Literal["pending", "applied", "discarded"]
 
 
 class DocumentPage(BaseModel):
@@ -778,7 +785,16 @@ class KnowledgeBasePlugin:
             chunk_count=content.chunk_count,
             edited=content.edited,
             revision=current.ref.revision,
+            edit_id=submission["submission_id"],
         )
+
+    async def edit_status(self, request: ApiRequest) -> EditStatus:
+        record = await self._knowledge_base(request.path_params["kb_id"], "scope.read")
+        edit_id = request.path_params["edit_id"]
+        status = await self.store.edit_status(record["scope_id"], request.path_params["document_id"], edit_id)
+        if status is None:
+            raise ApiError(404, "edit_not_found", "The edit was not found.")
+        return EditStatus(edit_id=edit_id, status=status)
 
     async def restore_revision(self, request: ApiRequest) -> None:
         body: RestoreRevision = request.body
@@ -950,6 +966,7 @@ class KnowledgeBasePlugin:
                 indexed = await self._indexed(request.scope_id, [set_id])
                 content = content.model_copy(update={"chunk_set": set_id, "chunk_count": len(indexed)})
             planned.append((document_id(upload.knowledge_base_id, upload.name), content, source.ref))
+        discarded: list[str] = []
         async with writer.transaction() as tx:
             for identity, item, ref in planned:
                 if isinstance(item, DocumentContent):
@@ -958,6 +975,7 @@ class KnowledgeBasePlugin:
                 current = await tx.get(identity)
                 if current is None or current.ref.revision != item.base_revision:
                     # The document changed after the user read it; the edit is not applied.
+                    discarded.append(item.edit_id)
                     continue
                 edited = DocumentContent.model_validate(current.content).model_copy(
                     update={
@@ -971,6 +989,7 @@ class KnowledgeBasePlugin:
         # Marked only after the commit, so a document never looks done before its revision exists.
         # A crash right after the commit leaves the mark unset; the listing then recognizes the
         # submission from the revision it produced.
+        await self.store.mark_discarded(request.scope_id, discarded)
         await self.store.mark_processed(
             request.scope_id,
             [item.edit_id if isinstance(item, ChunkEditRecord) else item.submission_id for _, item, _ in planned],
@@ -1084,6 +1103,7 @@ plugin = ArtifactPlugin(
                 response_model=Document,
                 timeout_seconds=120,
             ),
+            _route("GET", DOC + "/edits/{edit_id}", "edit_status", response_model=EditStatus),
             _route("POST", DOC + "/restorations", "restore_revision", body="json", request_model=RestoreRevision),
             _route(
                 "POST",
