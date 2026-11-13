@@ -4,12 +4,22 @@
 | --- | --- |
 | 设计源 | [RFC #2579 插件热加载与自定义接口](https://github.com/oceanbase/powercontext/pull/2579) |
 | 前置设计 | [插件接口设计](2549_plugin_interfaces_design.md)（RFC #2549） |
-| 文档状态 | 设计草案 |
-| 日期 | 2026-11-11 |
+| 实现 | 插件接口与页面：[oceanbase/powercontext#2616](https://github.com/oceanbase/powercontext/pull/2616)；热加载、数据升级、MCP 工具：后续 |
+| 日期 | 2026-11-13 |
 | 技术栈 | Python 3.11+ / pydantic v2 / FastAPI / Starlette；Dashboard 为服务端渲染页面加少量脚本 |
 
 本文是 RFC #2579 的实现设计，建立在 RFC #2549 的实现设计之上：宿主进程、已激活插件记录、写入器和用户修改模式都沿用
-该文档，本文只描述新增和改变的部分。两者冲突时以 RFC 为准，并修订本文。
+该文档，本文只描述新增和改变的部分。两者冲突时以 RFC 为准，并修订本文。插件要实现的接口总表见 RFC #2549 设计第 0 节。
+
+| 部分 | 状态 | 章节 |
+| --- | --- | --- |
+| 插件路由、二进制请求体与响应、处理函数的能力 | #2616 已实现 | §5.1–§5.3、§6 |
+| 插件页面 | #2616 已实现 | §7 |
+| 扫描、版本快照、切换（热加载） | 未实现；插件在 Server 启动时加载，更新插件需要重启 | §2–§4.6 |
+| 数据升级 `upgrade` | 未实现 | §4.7 |
+| 插件接口描述（OpenAPI） | 未实现 | §5.4 |
+| MCP 工具 | 未实现；声明中的 `mcp` 字段已校验，不生成工具 | §5.5 |
+| `/v1/plugins` 的版本字段与结构化可观测性 | 未实现 | §4.6、§8 |
 
 ---
 
@@ -28,17 +38,17 @@
 
 | 文件 | 状态 | 职责 |
 | --- | --- | --- |
-| `src/powercontext/server/plugin_reload.py` | 新增 | 扫描循环、摘要计算、稳定判断、快照生成与清理 |
-| `src/powercontext/server/plugins.py` | 修改 | `PluginManager` 增加新增、更新、移除的切换逻辑；已激活插件记录增加版本信息 |
-| `src/powercontext/server/plugin_hosts.py` | 修改 | 宿主进程替换：新进程就绪后切换，旧进程排空后停止 |
-| `src/powercontext/server/plugin_api.py` | 新增 | 插件路由分组、路由匹配、授权、请求体读取、转交宿主进程、响应映射、OpenAPI 生成 |
-| `src/powercontext/builtin/plugins/host.py` | 修改 | 处理 `api` 请求：Scope 授权、`request_model` 校验、调用处理函数；在本地提供 `ctx.require`、`ctx.reads`、`ctx.writer`、`ctx.sources`、`ctx.scopes` |
-| `src/powercontext/builtin/plugins/host_protocol.py` | 修改 | 增加 `api` 请求与响应 |
-| `src/powercontext/plugins.py` | 修改 | `PluginApi`、`Route`、`ApiRequest`、`BinaryResponse`、`ApiError`、`Caller`、`PluginPages` |
-| `src/powercontext/server/dashboard/plugins.py` | 新增 | 插件页面的宿主页面、静态文件、服务端转发、`_client.js` |
-| `src/powercontext/server/dashboard/static/plugin-host.js` | 新增 | 宿主页面脚本：iframe 管理与消息转发 |
-| `src/powercontext/server/dashboard/static/plugin-client.js` | 新增 | 提供给插件页面的客户端脚本 |
-| `openapi/powercontext.yaml` | 修改 | `GET /v1/plugins/{name}/openapi.json`；`/v1/plugins` 响应字段 |
+| `src/powercontext/plugins.py` | 已实现 | `PluginApi`、`Route`、`ApiRequest`、`BinaryResponse`、`ApiError`、`Caller`、`PluginPages`、`PluginSources`、`PluginScopes` |
+| `src/powercontext/server/app.py` | 已实现 | `call_plugin_api`：路由匹配、请求体限制、转交宿主进程、响应映射 |
+| `src/powercontext/builtin/plugins/host.py` | 已实现 | 处理 `api` 请求：Scope 授权、`request_model` 校验、调用处理函数；在本地提供 `ctx.require`、`ctx.reads`、`ctx.writer`、`ctx.sources`、`ctx.scopes` |
+| `src/powercontext/builtin/plugins/host_protocol.py` | 已实现 | `api` 请求与响应 |
+| `src/powercontext/server/dashboard/plugin_pages.py` | 已实现 | 导航项、宿主页面、静态文件、服务端转发、`_client.js` |
+| `src/powercontext/server/dashboard/templates/plugin.html` | 已实现 | 宿主页面与其脚本：iframe 管理与消息转发 |
+| `src/powercontext/server/dashboard/static/plugin-client.js` | 已实现 | 提供给插件页面的客户端脚本 |
+| `src/powercontext/server/plugin_reload.py` | 待实现 | 扫描循环、摘要计算、稳定判断、快照生成与清理 |
+| `src/powercontext/server/plugins.py` | 待修改 | `PluginManager` 增加新增、更新、移除的切换逻辑；插件记录增加版本信息 |
+| `src/powercontext/server/plugin_hosts.py` | 待修改 | 宿主进程替换：新进程就绪后切换，旧进程排空后停止 |
+| `openapi/powercontext.yaml` | 待修改 | 插件接口描述；`/v1/plugins` 的版本字段 |
 
 ---
 
@@ -128,7 +138,7 @@ Server 启动时，在第一次扫描生成当前快照之后，删除 `plugin-v
 
 ### 4.1 状态
 
-已激活插件记录（RFC #2549 设计 §3.2）增加：
+已激活插件记录（RFC #2549 设计 §4.2）增加：
 
 ```python
     version_digest: str | None         # 当前快照的摘要
@@ -140,7 +150,7 @@ Server 启动时，在第一次扫描生成当前快照之后，删除 `plugin-v
 
 ### 4.2 新增
 
-检查通过后执行 RFC #2549 设计 §3.4 的注册，并注册插件路由（§5）和页面（§7）。检查失败时 `state="failed"`。
+检查通过后执行 RFC #2549 设计 §4.4 的注册，并注册插件路由（§5）和页面（§7）。检查失败时 `state="failed"`。
 
 ### 4.3 更新
 
@@ -181,11 +191,11 @@ Server 启动时，在第一次扫描生成当前快照之后，删除 `plugin-v
   -> 导入插件，核对声明，打开数据库、授权服务、专属存储和模型
   -> 声明了 upgrade：以插件自身身份执行 upgrade(ctx)，受 upgrade_timeout_seconds 约束
        -> 异常或超时：发送 HostFailed(category="upgrade_failed")，进程退出
-  -> 执行 create(ctx)，发送 HostReady
+  -> 执行 setup(ctx)，发送 HostReady
 ```
 
 - `upgrade` 期间 `ctx` 的请求辅助方法处于"插件身份"模式：`reads`、`writer` 不检查调用者，不要求先 `require`；`caller`、
-  `require`、`sources`、`scopes` 不可用。`create` 之后恢复为按请求调用者执行。
+  `require`、`sources`、`scopes` 不可用。`setup` 之后恢复为按请求调用者执行。
 - Server 收到 `upgrade_failed` 时按检查失败处理（§4.3），记录 `upgrade_failed` 事件；不进入宿主进程的重启退避，下一个版本
   被扫描到时再尝试。
 - 声明了 `upgrade` 的插件在加载时立即启动宿主进程。Server 启动时，这类插件的 binding 在宿主进程就绪后才注册；热加载时，
@@ -206,47 +216,48 @@ Server 为插件分组注册一条通配路由：
 
 处理流程：
 
-1. 按 `name` 找到已激活插件，不存在或 `state != "loaded"` 返回 404；
-2. 在该插件的路由表中按 `(method, path)` 匹配。路由表由声明编译为 Starlette 的 `compile_path` 正则，匹配顺序为：没有参数的
-   路径优先，其次按声明顺序；
-3. 认证调用者，未认证返回 401；
-4. 读取请求体：`json` 不超过 1 MiB，`binary` 不超过 `POWERCONTEXT_SERVER_PLUGIN_API_MAX_BODY_BYTES`，超出返回 413；
+1. 认证调用者，未认证返回 401；
+2. 按 `name` 找到加载成功的插件，不存在返回 404；
+3. 在该插件的路由中按方法和路径匹配。每条路由的路径用 Starlette 的 `compile_path` 编译，匹配顺序为：没有参数的路径优先，
+   其次按声明顺序；没有匹配时返回 404；
+4. 读取请求体：上限为路由的 `max_body_bytes`，未声明时 `json` 为 1 MiB、`binary` 为部署上限；任何路由都不超过
+   `POWERCONTEXT_SERVER_PLUGIN_API_MAX_BODY_BYTES`（默认 32 MiB）。超出返回 413；
 5. 构造 `HostRequest(method="api", ...)`，携带调用者、路由模板、路径参数、查询参数和请求体，交给宿主进程；
 6. 宿主进程：`access` 为 Scope 权限时，取 `scope_param` 对应的路径参数作为 Scope ID，按 `scope.read` 或
    `scope.contribute` 授权，不满足返回 403；`authenticated` 不再检查；校验 `request_model`；调用处理函数；
 7. Server 映射响应（§5.3）。
 
 Server 只做不需要插件、也不需要权限服务的部分：找到插件和路由、认证、限制请求大小。授权和之后的步骤都在宿主进程中完成，
-与 RFC #2549 设计 §6 的分工一致。
+与 RFC #2549 设计 §7 的分工一致。
 
 ### 5.2 二进制请求体与响应
 
 二进制请求体以 bytes 直接放在 `HostRequest` 中，经 `Pipe` 传给宿主进程；处理函数返回的 `BinaryResponse` 同样以 bytes
-放在 `HostResponse` 中传回。请求和响应都受 `POWERCONTEXT_SERVER_PLUGIN_API_MAX_BODY_BYTES` 限制（默认 32 MiB），超过上限
-的响应按 500 处理并记录。传递时 Server 与宿主进程各持有一份副本，单个请求的峰值内存约为上限的两倍。
+放在 `HostResponse` 中传回。传递时 Server 与宿主进程各持有一份副本，单个请求的峰值内存约为上限的两倍。
 
 ### 5.3 响应映射
 
 | 宿主进程结果 | HTTP |
 | --- | --- |
-| 返回 `response_model` 实例 | 200，JSON |
+| 返回 Pydantic 模型或 JSON 值 | 200，JSON |
 | 返回 `BinaryResponse` | 200，按 `content_type` 与 `filename` 设置响应头 |
 | 返回 `None` | 204 |
-| `ApiError(status, code, message)` | `status`，body 为 `{"code", "message"}`；`status` 不在 400–499 或为 401、403 时按 500 处理 |
+| `ApiError(status, code, message)` | `status`，错误码与消息取自 `ApiError`；`ApiError` 构造时只接受 401、403 以外的 4xx，否则构造本身抛出异常，按 500 处理 |
 | `ctx.require` 或写入授权失败 | 403 |
-| `request_model` 校验失败 | 422 |
+| `request_model` 校验失败或 `InvalidContent` | 422 |
 | 其他异常 | 500，只记录异常类型 |
-| 超过 `timeout_seconds` | 504 |
-| 宿主进程不可用或退避中 | 503 |
+| 超过 `timeout_seconds`、宿主进程不可用或退避中 | 503；超时时宿主进程被替换 |
 
-### 5.4 OpenAPI
+错误响应使用 Server 的统一错误格式。
+
+### 5.4 OpenAPI（未实现）
 
 `GET /v1/plugins/{name}/openapi.json` 由路由表生成：每条路由一个 operation，`operationId` 为 `<name>_<handler>`；
 `request_model`、`response_model` 的 JSON Schema 来自检查子进程导出的声明；`binary` 请求体为
-`application/octet-stream`；统一加入 401、403、404、413、422、500、503、504 的错误响应；扩展字段
+`application/octet-stream`；统一加入 401、403、404、413、422、500、503 的错误响应；扩展字段
 `x-powercontext-access` 记录 `access` 与 `scope_param`。
 
-### 5.5 MCP 工具
+### 5.5 MCP 工具（未实现）
 
 - 现有的 `create_mcp_server` 在启动时从 Server 的 OpenAPI 文档生成工具，经内部桥接（`_InternalBridgeTransport`）调用
   HTTP 路由。插件工具复用同一桥接：每个 `mcp=True` 的路由生成一个工具，调用时以 MCP 会话的认证信息请求
@@ -264,17 +275,19 @@ Server 只做不需要插件、也不需要权限服务的部分：找到插件�
 
 ## 6. 处理函数的能力
 
-处理函数在宿主进程中运行。宿主进程是"core 运行时 + 插件"（RFC #2549 设计 §6.1），已经有数据库连接、按 Worker 方式重建的
+处理函数在宿主进程中运行。宿主进程是"core 运行时 + 插件"（RFC #2549 设计 §7.1），已经有数据库连接、按 Worker 方式重建的
 权限服务（`AccessControlService`）和 Scope 服务，因此 `ctx` 上的能力都在宿主进程本地实现，以请求携带的调用者授权：
 
 | 能力 | 实现 |
 | --- | --- |
 | `ctx.require(action, scope_id)` | 用本地权限服务检查调用者是否具备该权限 |
+| `ctx.allowed(action, scope_id)` | 同上，返回布尔值而不抛出异常 |
+| `ctx.caller` | 当前请求的调用者 |
 | `ctx.reads(scope_id)` | 先检查 `scope.read`，再创建只读视图，读取按调用者身份过滤 |
-| `ctx.writer(scope_id)` | 只接受 `request.scope_id` 且路由为 `scope.contribute`；以调用者身份创建写入器（RFC #2549 设计 §5.5 的授权方式），不限定写操作种类 |
-| `ctx.sources.submit(scope_id, definition, value)` | 同上的范围限制；执行 `resolve` 与 Projection，以调用者身份保存 |
-| `ctx.scopes.create(...)` | 检查调用者具备 `server.admin`；调用 `ScopeApplication.create`，加入外部引用 `{"kind": "powercontext.plugin", "value": <插件名>}`；成功后调用 `AccessControlService.bootstrap_static_scope` 让调用者成为管理员，与 `POST /v1/scopes` 的实现相同 |
-| `ctx.scopes.update(...)` | 先确认 Scope 带有本插件的外部引用，再按 `PUT /v1/scopes/{scope_id}` 的实现与授权执行 |
+| `ctx.writer(scope_id)` | 以调用者身份创建写入器（RFC #2549 设计 §6.5 的授权方式），写操作按调用者的 `scope.contribute` 授权，不限定写操作种类 |
+| `ctx.sources.submit(scope_id, definition, value)` | 检查调用者的 `scope.contribute`；执行 `resolve` 与 Projection，以调用者身份保存 |
+| `ctx.scopes.create(...)` | 检查调用者具备 `server.admin`；创建 Scope 并加入外部引用 `{"kind": "powercontext.plugin", "value": <插件名>}`；成功后让调用者成为该 Scope 的管理员，与 `POST /v1/scopes` 的实现相同 |
+| `ctx.scopes.update(...)` | 检查调用者具备 `server.admin`，确认 Scope 带有本插件的外部引用，再按 `PUT /v1/scopes/{scope_id}` 的实现执行 |
 | `ctx.scopes.list()` | 列出调用者可见、带有本插件外部引用的 Scope |
 
 ---
@@ -286,63 +299,72 @@ Server 只做不需要插件、也不需要权限服务的部分：找到插件�
 | 路由 | 认证 | 说明 |
 | --- | --- | --- |
 | `GET /dashboard/plugins/{name}` | Dashboard 会话 | 宿主页面，`?scope=` 指定 Scope |
-| `GET /dashboard/plugins/{name}/ui/{path:path}` | 不要求 | 从当前快照的 `directory` 提供静态文件 |
+| `GET /dashboard/plugins/{name}/ui/{path:path}` | 不要求 | 从插件的 `directory` 提供静态文件（热加载实现后为当前快照） |
 | `* /dashboard/plugins/{name}/api/{path:path}` | Dashboard 会话 + 同源 | 服务端转发到 `/v1/plugins/{name}/api/{path}` |
 | `GET /dashboard/plugins/_client.js` | 不要求 | 插件页面客户端脚本 |
 
 ### 7.2 静态文件
 
-- 解析路径后确认位于快照的 `directory` 内，拒绝 `..` 与指向目录外的符号链接；
+- 解析路径后确认位于 `directory` 内，拒绝 `..` 与指向目录外的符号链接；
 - 扩展名白名单：`.html`、`.js`、`.css`、`.json`、`.svg`、`.png`、`.jpg`、`.webp`、`.woff2`；单个文件不超过 5 MiB；
-- 响应头：
+- 响应头（`<own>` 为 `/dashboard/plugins/{name}/ui/` 的绝对地址，`<client>` 为 `_client.js` 的绝对地址）：
 
   ```text
-  Content-Security-Policy: sandbox allow-scripts allow-forms allow-downloads allow-popups allow-popups-to-escape-sandbox;
-                           default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline';
-                           img-src 'self' data: https:; font-src 'self'; connect-src https:; frame-ancestors 'self'
+  Content-Security-Policy: sandbox allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads;
+                           default-src 'none'; script-src <own> <client>; style-src <own> 'unsafe-inline';
+                           img-src <own> data: https:; font-src <own>; connect-src https:; form-action https:;
+                           base-uri 'none'; frame-ancestors 'self'
   X-Content-Type-Options: nosniff
+  Referrer-Policy: no-referrer
   Cache-Control: no-cache
-  ETag: "<版本摘要>:<相对路径>"
   ```
+
+  `sandbox` 使页面运行在不透明来源，`'self'` 无法匹配插件自己的地址，因此脚本、样式、图片和字体都写成绝对地址。
 
 ### 7.3 宿主页面脚本
 
 ```text
-渲染 <iframe sandbox="allow-scripts allow-forms allow-downloads allow-popups allow-popups-to-escape-sandbox"
-            src="/dashboard/plugins/{name}/ui/{entry}">
+渲染 <iframe sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads">
+先注册监听，再设置 src="/dashboard/plugins/{name}/ui/{entry}"，保证第一次 load 就是插件页面
 loads = 0
 iframe.onload:
   loads += 1
-  loads == 1：postMessage(iframe.contentWindow, {type: "powercontext.context", scopeId, locale, theme}, "*")
-  loads > 1：停止转发，显示"重新打开插件页面"；点击后移除并重建 iframe，loads 归零
+  loads == 1：发送 {type: "powercontext.context", context}
+  loads > 1：停止转发，显示提示，由用户重新打开插件页面
 window.onmessage(event):
-  event.source !== iframe.contentWindow 或 loads != 1：忽略
+  未在转发或 event.source !== iframe.contentWindow：忽略
+  data.type == "powercontext.ready"：再次发送 context
   data.type == "powercontext.request"：
-    path 匹配本插件声明的路由（路由表随页面下发）→ fetch("/dashboard/plugins/{name}/api" + path, {method, body})
-    否则回复 status 404
-    回复 {type: "powercontext.response", id, status, headers, body}；二进制响应以 Blob 传回
+    方法和路径匹配本插件声明的路由（路由表随页面下发），且路径不含 . 或 .. 段
+      → fetch("/dashboard/plugins/{name}/api" + path, {method, body, credentials: "same-origin"})
+    否则回复 {status: 404, error: "route_not_declared"}
+    回复 {type: "powercontext.response", id, status, contentType, filename, json | blob}；网络错误时 {status: 0, error: "network_error"}
 ```
 
 ### 7.4 消息格式
 
 | 方向 | 消息 |
 | --- | --- |
-| 宿主页面 → 插件页面 | `{type: "powercontext.context", scopeId: string, locale: "zh" \| "en", theme: "light" \| "dark"}` |
-| 插件页面 → 宿主页面 | `{type: "powercontext.request", id: string, method: string, path: string, query?: Record<string, string[]>, body?: unknown \| Blob}` |
-| 宿主页面 → 插件页面 | `{type: "powercontext.response", id: string, status: number, headers: Record<string, string>, body: unknown \| Blob}` |
+| 宿主页面 → 插件页面 | `{type: "powercontext.context", context: {scopeId, locale, theme}}` |
+| 插件页面 → 宿主页面 | `{type: "powercontext.ready"}`：客户端脚本加载后发送，宿主页面回复 context |
+| 插件页面 → 宿主页面 | `{type: "powercontext.request", id, method, path, query, json?, body?, contentType?}` |
+| 宿主页面 → 插件页面 | `{type: "powercontext.response", id, status, contentType, filename?, json? \| blob?, error?}` |
 
-`_client.js` 导出 `powercontextPluginClient()`，提供 `context(): Promise<Context>` 和
-`request(method, path, {query, body}): Promise<{status, headers, body}>`，内部按 `id` 匹配响应，默认 60 秒超时。
+`_client.js` 定义 `window.powercontextPluginClient()`，返回 `context(): Promise<Context>` 和
+`request(method, path, {query, json, body, contentType}): Promise<{status, ok, contentType, filename, json, blob}>`；
+内部按 `id` 匹配响应，只接受来自父窗口的消息，`error` 时以带 `status` 的异常拒绝。客户端不设超时，时限由服务端路由决定。
 
 ### 7.5 服务端转发
 
-`/dashboard/plugins/{name}/api/...` 要求 Dashboard 会话 cookie；要求 `Sec-Fetch-Site: same-origin`，缺失时用
-`dashboard/session.py` 的 `same_origin` 校验 `Origin`；`Origin: null` 一律拒绝。通过后以 `authentication_headers` 取得会话
-身份，调用 `/v1/plugins/{name}/api/...`，原样返回状态码、`Content-Type`、`Content-Disposition` 和响应体。
+`/dashboard/plugins/{name}/api/...` 要求 Dashboard 会话；要求 `Sec-Fetch-Site: same-origin`，缺失时校验 `Origin` 与
+Server 同源；`Origin: null` 一律拒绝，返回 403。插件未加载或未声明页面时返回 404。通过后以会话身份执行与
+`/v1/plugins/{name}/api/...` 相同的处理（§5.1），返回状态码、`Content-Type`、`Content-Disposition` 和响应体。
 
 ---
 
 ## 8. 可观测性
+
+已实现：插件接口请求的审计操作名为 `plugin:<插件名>:<handler>`。以下字段和指标随热加载一起实现：
 
 | 字段 | 含义 |
 | --- | --- |
@@ -365,33 +387,33 @@ window.onmessage(event):
 
 | 项 | 默认值 | 配置 |
 | --- | --- | --- |
-| 扫描间隔 | 60 秒 | `POWERCONTEXT_SERVER_PLUGINS_RESCAN_SECONDS`（0 关闭热加载） |
+| 扫描间隔（待实现） | 60 秒 | `POWERCONTEXT_SERVER_PLUGINS_RESCAN_SECONDS`（0 关闭热加载） |
 | 稳定判断 | 连续 2 轮摘要相同 | 固定 |
 | 宿主进程就绪超时 | 60 秒 | 固定 |
 | 路由默认时限 | 30 秒 | 声明 `timeout_seconds` |
-| JSON 请求体上限 | 1 MiB | 固定 |
-| 二进制请求体与响应上限 | 32 MiB | `POWERCONTEXT_SERVER_PLUGIN_API_MAX_BODY_BYTES` |
+| JSON 请求体上限 | 1 MiB | 路由 `max_body_bytes` |
+| 二进制请求体上限 | 32 MiB | 路由 `max_body_bytes`，不超过 `POWERCONTEXT_SERVER_PLUGIN_API_MAX_BODY_BYTES` |
+| 每个插件的路由数 | 至多 200 | 固定 |
 | 页面静态文件上限 | 5 MiB | 固定 |
-| `_client.js` 请求超时 | 60 秒 | 插件页面可传入 |
-| 数据升级时限 | 600 秒 | 声明 `upgrade_timeout_seconds` |
+| 数据升级时限（待实现） | 600 秒 | 声明 `upgrade_timeout_seconds` |
 
 ---
 
 ## 10. 任务拆分
 
-| # | 任务 | 依赖 |
-| --- | --- | --- |
-| T1 | 扫描循环、版本摘要、稳定判断 | RFC #2549 设计 T2 |
-| T2 | 版本快照：生成、只读、引用计数、清理；检查子进程、宿主进程、Worker 改为从快照导入 | T1、RFC #2549 设计 T3 |
-| T3 | 切换：新增、更新、移除；声明差异的注册与注销；宿主进程替换 | T2 |
-| T4 | 插件路由：声明、匹配、授权、请求体、响应映射、二进制文件交换 | RFC #2549 设计 T3 |
-| T5 | 处理函数能力：`require`、`reads`、`writer`、`sources.submit`、`scopes`，在宿主进程中本地实现 | T4 |
-| T6 | 插件 OpenAPI 生成 | T4 |
-| T7 | 插件页面：静态文件、宿主页面、转发、`_client.js` | T4 |
-| T8 | `/v1/plugins` 响应字段与可观测性 | T3、T4 |
-| T9 | 浏览器验证：CSP `sandbox` 下 `'self'` 的匹配、不透明来源请求的 cookie 行为，在 Chromium、Firefox、Safari 上执行 | T7 |
-| T10 | MCP 工具：生成、注解、热加载时增删与通知 | T3、T4 |
-| T11 | 数据升级：宿主进程启动时执行 `upgrade`、插件身份上下文、`upgrade_failed` 的处理、binding 等待就绪 | T3、T5 |
+| # | 任务 | 依赖 | 状态 |
+| --- | --- | --- | --- |
+| T1 | 扫描循环、版本摘要、稳定判断 | RFC #2549 实现（#2616） | 待实现 |
+| T2 | 版本快照：生成、只读、引用计数、清理；检查子进程、宿主进程、Worker 改为从快照导入 | T1 | 待实现 |
+| T3 | 切换：新增、更新、移除；声明差异的注册与注销；宿主进程替换 | T2 | 待实现 |
+| T4 | 插件路由：声明、匹配、授权、请求体、响应映射、二进制文件交换 | RFC #2549 实现（#2616） | #2616 已完成 |
+| T5 | 处理函数能力：`require`、`reads`、`writer`、`sources.submit`、`scopes`，在宿主进程中本地实现 | T4 | #2616 已完成 |
+| T6 | 插件 OpenAPI 生成 | T4 | 待实现 |
+| T7 | 插件页面：静态文件、宿主页面、转发、`_client.js` | T4 | #2616 已完成 |
+| T8 | `/v1/plugins` 响应字段与可观测性 | T3、T4 | 待实现 |
+| T9 | 浏览器验证：CSP `sandbox` 下 `'self'` 的匹配、不透明来源请求的 cookie 行为，在 Chromium、Firefox、Safari 上执行 | T7 | Chromium 已手动验证；Firefox、Safari 待验证 |
+| T10 | MCP 工具：生成、注解、热加载时增删与通知 | T3、T4 | 待实现 |
+| T11 | 数据升级：宿主进程启动时执行 `upgrade`、插件身份上下文、`upgrade_failed` 的处理、binding 等待就绪 | T3、T5 | 待实现 |
 
 ---
 
@@ -400,7 +422,8 @@ window.onmessage(event):
 | 事项 | 说明 |
 | --- | --- |
 | 同机多实例共用数据目录 | 快照清理按"本进程创建"区分的做法是否足够，还是要求每个实例使用独立的数据目录 |
-| 大请求体的流式传输 | 第一版完整读入后经文件交换；是否需要直接流式转交宿主进程 |
+| 大请求体的流式传输 | 请求体完整读入后以 bytes 经 `Pipe` 转交；是否需要直接流式转交宿主进程 |
+| 浏览器兼容性 | CSP `sandbox` 下的页面行为已用 Playwright 在 Chromium 上手动验证；Firefox、Safari 待验证（T9） |
 
 ---
 
@@ -416,10 +439,10 @@ RFC #2549 设计 §16 的 D1、D2。
 | E3 | 插件接口的二进制请求体与响应以 bytes 直接经 `Pipe` 传递，受同一上限约束（§5.2） | 随 RFC #2549 设计 D1；不需要临时文件及其清理。代价是单个请求的峰值内存约为上限的两倍 | 已采用 |
 | E4 | 插件接口的授权和 `ctx` 上的全部能力在宿主进程本地实现，Server 只找路由、认证和限制请求大小（§5.1、§6） | 随 RFC #2549 设计 D2；不需要回调通道 | 已采用 |
 | E5 | 路由匹配时无参数的路径优先，其次按声明顺序（§5.1） | 与常见 Web 框架一致，避免参数路径吞掉固定路径 | 已采用 |
-| E6 | OpenAPI 的 `operationId` 与 MCP 工具名都是 `<插件名>_<handler>`（§5.4、§5.5） | 稳定、可预测，便于对照 | 已采用 |
-| E7 | MCP 工具复用现有的内部 HTTP 桥接，鉴权走 HTTP 路由本身（§5.5） | 与内置工具一致，不另写一套鉴权 | 已采用 |
-| E8 | 插件页面跳转或刷新后显示"重新打开插件页面"，重建 iframe 后恢复转发（§7.3） | 页面跳转后无法区分插件页面与外部页面 | 已采用 |
-| E9 | 静态文件以 `<版本摘要>:<相对路径>` 作为 ETag 并设 `no-cache`（§7.2） | 切换版本后浏览器立即取到新文件 | 已采用 |
-| E10 | `upgrade` 在新宿主进程中、`create` 之前执行，而不是另起一个子进程（§4.7） | 宿主进程本来就要在使用新版本前启动，复用它的运行时和资源；执行失败等同于新宿主进程启动失败，沿用现有的保留旧版本流程 | 待确认 |
+| E6 | OpenAPI 的 `operationId` 与 MCP 工具名都是 `<插件名>_<handler>`（§5.4、§5.5） | 稳定、可预测，便于对照 | 待实现 |
+| E7 | MCP 工具复用现有的内部 HTTP 桥接，鉴权走 HTTP 路由本身（§5.5） | 与内置工具一致，不另写一套鉴权 | 待实现 |
+| E8 | 插件页面跳转或刷新后停止转发并提示用户重新打开（§7.3） | 页面跳转后无法区分插件页面与外部页面 | 已采用 |
+| E9 | 静态文件设 `no-cache`（§7.2） | 插件更新后浏览器立即取到新文件；热加载实现后可加上以版本摘要为前缀的 ETag | 已采用 |
+| E10 | `upgrade` 在新宿主进程中、`setup` 之前执行，而不是另起一个子进程（§4.7） | 宿主进程本来就要在使用新版本前启动，复用它的运行时和资源；执行失败等同于新宿主进程启动失败，沿用现有的保留旧版本流程 | 待确认 |
 | E11 | `upgrade` 期间 `reads`、`writer` 以插件身份执行，不提供调用者相关的能力（§4.7） | 升级没有请求调用者，与 Worker 的权限模型一致 | 待确认 |
 | E12 | 宿主进程崩溃重启时再次执行 `upgrade`（§4.7） | 与"每次加载都调用、必须可重复执行"的约定一致，不需要额外记录"本进程是否已升级" | 待确认 |
