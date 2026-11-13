@@ -409,6 +409,13 @@ def _parser(choice: ParserChoice) -> ParserChoice:
 RENDERED_CHUNKS = 3
 
 
+_SEARCH_MODES: dict[str, Literal["hybrid", "keyword", "vector"]] = {
+    "hybrid": "hybrid",
+    "keyword": "keyword",
+    "vector": "vector",
+}
+
+
 class KnowledgeBasePlugin:
     def __init__(self, ctx: PluginContext, store: KnowledgeBaseStore) -> None:
         self.ctx = ctx
@@ -826,13 +833,15 @@ class KnowledgeBasePlugin:
         unsupported = set(request.search) - {"query", "limit", "mode"}
         if unsupported:
             raise InvalidContent("unsupported search fields: " + ", ".join(sorted(unsupported)))
-        mode = request.search.get("mode", "hybrid")
-        if mode not in {"hybrid", "keyword", "vector"}:
+        mode = _SEARCH_MODES.get(str(request.search.get("mode", "hybrid")))
+        if mode is None:
             raise InvalidContent("mode must be hybrid, keyword, or vector", field="mode")  # noqa: TRY003
+        limit = request.search.get("limit", 10)
+        if not isinstance(limit, int) or isinstance(limit, bool) or limit < 1:
+            raise InvalidContent("limit must be a positive integer", field="limit")  # noqa: TRY003
         bases = [record for record in await self.store.knowledge_bases() if record["scope_id"] == request.scope_id]
         if not bases:
             return FamilySearchResult()
-        limit = int(request.search.get("limit", 10))
         hits = await self._search(str(request.search["query"]), [bases[0]["kb_id"]], limit, mode)
         reads = self.ctx.reads(request.scope_id)
         results = []
