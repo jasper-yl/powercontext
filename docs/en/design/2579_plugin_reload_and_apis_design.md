@@ -17,11 +17,11 @@ plugin implements is section 0 of the RFC #2549 design.
 | --- | --- | --- |
 | Plugin routes, binary request and response bodies, handler capabilities | Implemented in #2616 | §5.1–§5.3, §6 |
 | Plugin pages | Implemented in #2616 | §7 |
-| Scanning, version snapshots, switching (hot reload) | Not implemented; plugins load at Server startup, and updating one needs a restart | §2–§4.6 |
-| Data upgrade `upgrade` | Not implemented | §4.7 |
-| Plugin API description (OpenAPI) | Not implemented | §5.4 |
-| MCP tools | Not implemented; the declaration's `mcp` field is validated but no tools are generated | §5.5 |
-| Version fields of `/v1/plugins` and structured observability | Not implemented | §4.6, §8 |
+| Scanning, version snapshots, switching (hot reload) | Implemented in #2638 | §2–§4.6 |
+| Data upgrade `upgrade` | Implemented in #2638 | §4.7 |
+| Plugin API description (OpenAPI) | Implemented in #2638 | §5.4 |
+| MCP tools | Implemented in #2638 | §5.5 |
+| Version fields of `/v1/plugins` and structured observability | Implemented in #2638; plugin API metrics are not | §4.6, §8 |
 
 ---
 
@@ -47,7 +47,7 @@ plugin implements is section 0 of the RFC #2549 design.
 | `src/powercontext/server/dashboard/plugin_pages.py` | Implemented | Navigation entries, hosting page, static files, server-side forwarding, `_client.js` |
 | `src/powercontext/server/dashboard/templates/plugin.html` | Implemented | The hosting page and its script: iframe management and message forwarding |
 | `src/powercontext/server/dashboard/static/plugin-client.js` | Implemented | Client script for plugin pages |
-| `src/powercontext/server/plugin_reload.py` | To implement | Scan loop, digests, settling, snapshot creation and cleanup |
+| `src/powercontext/server/plugin_versions.py` | Implemented | Version digests, snapshot creation and cleanup; the scan loop and switching are in `server/plugins.py` |
 | `src/powercontext/server/plugins.py` | To change | `PluginManager` gains switching for additions, updates, and removals; the plugin record gains version information |
 | `src/powercontext/server/plugin_hosts.py` | To change | Host process replacement: switch once the new process is ready, stop the old one once drained |
 | `openapi/powercontext.yaml` | To change | Plugin API description; version fields of `/v1/plugins` |
@@ -118,7 +118,7 @@ After a digest fails its check, it is not checked again until the content change
 1. Copy into `<data directory>/plugin-versions/<plugin name>/.tmp-<random>/`, skipping `__pycache__`;
 2. recompute the digest of the temporary directory and abandon this round if it differs from the scanned digest (the
    directory changed during the copy);
-3. make the files read-only (files `0444`, directories `0555`);
+3. make the files read-only (`0444`); directories stay writable by the owner (`0755`) so ordinary tools can still delete the data directory;
 4. rename to `<version digest>/`; if the target already exists, delete the temporary directory and use the existing
    snapshot.
 
@@ -133,8 +133,9 @@ After a digest fails its check, it is not checked again until the content change
 
 ### 3.4 References and cleanup
 
-`PluginManager` keeps an in-process reference count for each snapshot: 1 for the current version, 1 for each running host
-process, and 1 for each dispatched, unfinished Worker. The end of each scan deletes snapshots with a count of 0.
+At the end of a scan, a process deletes the snapshots it created that are no plugin's current version, are not used by
+an old host process of this process that is still draining, and whose last Worker dispatch is older than the plugin's
+Worker time limit plus 60 seconds. Workers never outlive their time limit, so no per-Worker tracking is needed.
 
 At Server startup, after the first scan creates the current snapshots, every other snapshot and leftover temporary
 directory under `plugin-versions/` is deleted. When several Server processes share one data directory (several instances
@@ -174,7 +175,7 @@ check sets `state="failed"`.
 
 Unregister the Source types, family, merge registration, routes, pages, and binding (`replace_binding(name, None)`); stop
 accepting new synchronous calls to the plugin; stop the host process once in-flight synchronous calls finish or time out;
-decrement the current snapshot's reference count.
+the snapshot is deleted by a later scan under the rules of §3.4.
 
 ### 4.5 Host process replacement
 
@@ -184,7 +185,7 @@ decrement the current snapshot's reference count.
   -> ready: atomically swap the PluginHost to the new process; new requests go to it
   -> mark the old process draining: it accepts no requests; send shutdown once in-flight requests finish;
      terminate it if any request exceeds its time limit
-  -> after the old process exits, decrement the old snapshot's reference count
+  -> after the old process exits, a later scan deletes the old snapshot under the rules of §3.4
 ```
 
 If the host process is in restart backoff and not running, only the snapshot is updated, and it starts from the new
@@ -277,14 +278,14 @@ single request's peak memory is about twice the limit.
 
 Error responses use the Server's standard error format.
 
-### 5.4 OpenAPI (not implemented)
+### 5.4 OpenAPI
 
 `GET /v1/plugins/{name}/openapi.json` is generated from the route table: one operation per route with `operationId`
 `<name>__<handler>`; the JSON Schemas of `request_model` and `response_model` come from the declaration the check child
 process exports; `binary` bodies are `application/octet-stream`; every operation lists 401, 403, 404, 413, 422, 500, 503,
 and 504 error responses; the extension `x-powercontext-access` records `access` and `scope_param`.
 
-### 5.5 MCP tools (not implemented)
+### 5.5 MCP tools
 
 - The existing `create_mcp_server` generates tools from the Server's OpenAPI document at startup and calls HTTP routes
   through an internal bridge (`_InternalBridgeTransport`). Plugin tools reuse the same bridge: each `mcp=True` route
@@ -294,10 +295,9 @@ and 504 error responses; the extension `x-powercontext-access` records `access` 
   property; the output schema is the `response_model` JSON Schema.
 - Annotations: `GET` routes with `scope.read` or `authenticated` access get `readOnlyHint=True` and
   `idempotentHint=True`; other routes get `readOnlyHint=False`. `openWorldHint` is always `False`.
-- Hot reload: after a switch, FastMCP 3.4's `add_tool` / `remove_tool` update the tools, so `tools/list` always returns
-  the current set. FastMCP can send the tool-list-changed notification only inside a session's request context, while
-  hot reload happens outside requests; the implementation sends the notification on the session's next request, and
-  otherwise clients see the change the next time they list tools.
+- Hot reload: a FastMCP `Provider` builds plugin tools from the plugins loaded at each `tools/list` and call, so a
+  switch shows immediately. The Server's MCP endpoint is stateless HTTP (`stateless_http=True`) with no session to push
+  a tool list change notification to; clients see changes the next time they list tools.
 - Tool names are `<plugin name>__<handler>` with the plugin name unchanged. Plugin names contain no underscores, so
   everything before the first double underscore is the plugin name and tools of different plugins cannot collide; a name
   over 64 characters, or one colliding with a built-in tool, fails the plugin's check.
@@ -423,7 +423,7 @@ Metrics:
 
 | Item | Default | Configuration |
 | --- | --- | --- |
-| Scan interval (to implement) | 60 seconds | `POWERCONTEXT_SERVER_PLUGINS_RESCAN_SECONDS` (0 disables hot reload) |
+| Scan interval  | 60 seconds | `POWERCONTEXT_SERVER_PLUGINS_RESCAN_SECONDS` (0 disables hot reload) |
 | Settling | Same digest for 2 consecutive scans | Fixed |
 | Host process readiness timeout | 60 seconds | Fixed |
 | Default route time limit | 30 seconds | Declaration `timeout_seconds` |
@@ -431,7 +431,7 @@ Metrics:
 | Binary request body limit | 32 MiB | Route `max_body_bytes`, capped by `POWERCONTEXT_SERVER_PLUGIN_API_MAX_BODY_BYTES` |
 | Routes per plugin | At most 200 | Fixed |
 | Page static file limit | 5 MiB | Fixed |
-| Data upgrade time limit (to implement) | 600 seconds | Declaration `upgrade_timeout_seconds` |
+| Data upgrade time limit  | 600 seconds | Declaration `upgrade_timeout_seconds` |
 
 ---
 
@@ -439,17 +439,17 @@ Metrics:
 
 | # | Task | Depends on | Status |
 | --- | --- | --- | --- |
-| T1 | Scan loop, version digest, settling | RFC #2549 implementation (#2616) | To implement |
-| T2 | Version snapshots: creation, read-only files, reference counts, cleanup; check child processes, host processes, and Workers import from snapshots | T1 | To implement |
-| T3 | Switching: addition, update, removal; registering and unregistering declaration differences; host process replacement | T2 | To implement |
+| T1 | Scan loop, version digest, settling | RFC #2549 implementation (#2616) | Done in #2638 |
+| T2 | Version snapshots: creation, read-only files, retention, cleanup; check child processes, host processes, and Workers import from snapshots | T1 | Done in #2638 |
+| T3 | Switching: addition, update, removal; registering and unregistering declaration differences; host process replacement | T2 | Done in #2638 |
 | T4 | Plugin routes: declaration, matching, authorization, request bodies, response mapping, binary file exchange | RFC #2549 implementation (#2616) | Done in #2616 |
 | T5 | Handler capabilities: `require`, `reads`, `writer`, `sources.submit`, `scopes`, implemented locally in the host process | T4 | Done in #2616 |
-| T6 | Plugin OpenAPI generation | T4 | To implement |
+| T6 | Plugin OpenAPI generation | T4 | Done in #2638 |
 | T7 | Plugin pages: static files, hosting page, forwarding, `_client.js` | T4 | Done in #2616 |
-| T8 | `/v1/plugins` response fields and observability | T3, T4 | To implement |
+| T8 | `/v1/plugins` response fields and observability | T3, T4 | Done in #2638 |
 | T9 | Browser verification: how `'self'` matches under the CSP `sandbox` directive and cookie behavior for opaque-origin requests, on Chromium, Firefox, and Safari | T7 | Chromium verified manually; Firefox and Safari to verify |
-| T10 | MCP tools: generation, annotations, adding and removing on hot reload with notifications | T3, T4 | To implement |
-| T11 | Data upgrades: running `upgrade` at host process startup, the plugin-identity context, handling `upgrade_failed`, bindings waiting for readiness | T3, T5 | To implement |
+| T10 | MCP tools: generation, annotations, adding and removing on hot reload with notifications | T3, T4 | Done in #2638 |
+| T11 | Data upgrades: running `upgrade` at host process startup, the plugin-identity context, handling `upgrade_failed`, bindings waiting for readiness | T3, T5 | Done in #2638 |
 
 ---
 
@@ -476,8 +476,8 @@ prescribe, to confirm one by one in review. The host process model and communica
 | E3 | Binary request and response bodies of plugin APIs pass as bytes over the `Pipe`, under one limit (§5.2) | Follows RFC #2549 design D1; no temporary files to clean up. The cost is a peak memory of about twice the limit per request | Adopted |
 | E4 | Plugin API authorization and every capability on `ctx` are implemented locally in the host process; the Server only finds the route, authenticates, and limits body size (§5.1, §6) | Follows RFC #2549 design D2; no callback channel | Adopted |
 | E5 | Route matching tries paths without parameters first, then declaration order (§5.1) | Consistent with common web frameworks; parameterized paths cannot swallow fixed ones | Adopted |
-| E6 | The OpenAPI `operationId` and the MCP tool name are both `<plugin name>__<handler>` (§5.4, §5.5) | Stable, predictable, and easy to cross-reference; plugin names contain no underscores, so the double-underscore separator cannot collide | To implement |
-| E7 | MCP tools reuse the existing internal HTTP bridge, with authorization done by the HTTP route itself (§5.5) | Consistent with built-in tools, with no second authorization path | To implement |
+| E6 | The OpenAPI `operationId` and the MCP tool name are both `<plugin name>__<handler>` (§5.4, §5.5) | Stable, predictable, and easy to cross-reference; plugin names contain no underscores, so the double-underscore separator cannot collide | Adopted |
+| E7 | MCP tools reuse the existing internal HTTP bridge, with authorization done by the HTTP route itself (§5.5) | Consistent with built-in tools, with no second authorization path | Adopted |
 | E8 | After a plugin page navigates or reloads, forwarding stops and a notice asks the user to reopen it (§7.3) | After navigation the plugin page cannot be told apart from an external page | Adopted |
 | E9 | Static files are served with `no-cache` (§7.2) | Browsers fetch new files right after a plugin update; once hot reload exists, an ETag prefixed with the version digest can be added | Adopted |
 | E10 | Instances that receive requests run `upgrade` in the new host process before `setup`; `background` instances use a short-lived child process that runs only `upgrade` (§4.7) | The host process has to start before the new version is used anyway, so it reuses that runtime and its resources; `background` instances have no host process yet must keep new `generate` on upgraded data. A failure follows the keep-the-old-version path | To confirm |

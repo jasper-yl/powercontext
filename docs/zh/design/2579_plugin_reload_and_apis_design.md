@@ -15,11 +15,11 @@
 | --- | --- | --- |
 | 插件路由、二进制请求体与响应、处理函数的能力 | #2616 已实现 | §5.1–§5.3、§6 |
 | 插件页面 | #2616 已实现 | §7 |
-| 扫描、版本快照、切换（热加载） | 未实现；插件在 Server 启动时加载，更新插件需要重启 | §2–§4.6 |
-| 数据升级 `upgrade` | 未实现 | §4.7 |
-| 插件接口描述（OpenAPI） | 未实现 | §5.4 |
-| MCP 工具 | 未实现；声明中的 `mcp` 字段已校验，不生成工具 | §5.5 |
-| `/v1/plugins` 的版本字段与结构化可观测性 | 未实现 | §4.6、§8 |
+| 扫描、版本快照、切换（热加载） | #2638 已实现 | §2–§4.6 |
+| 数据升级 `upgrade` | #2638 已实现 | §4.7 |
+| 插件接口描述（OpenAPI） | #2638 已实现 | §5.4 |
+| MCP 工具 | #2638 已实现 | §5.5 |
+| `/v1/plugins` 的版本字段与结构化可观测性 | #2638 已实现；插件接口的指标未实现 | §4.6、§8 |
 
 ---
 
@@ -45,7 +45,7 @@
 | `src/powercontext/server/dashboard/plugin_pages.py` | 已实现 | 导航项、宿主页面、静态文件、服务端转发、`_client.js` |
 | `src/powercontext/server/dashboard/templates/plugin.html` | 已实现 | 宿主页面与其脚本：iframe 管理与消息转发 |
 | `src/powercontext/server/dashboard/static/plugin-client.js` | 已实现 | 提供给插件页面的客户端脚本 |
-| `src/powercontext/server/plugin_reload.py` | 待实现 | 扫描循环、摘要计算、稳定判断、快照生成与清理 |
+| `src/powercontext/server/plugin_versions.py` | 已实现 | 版本摘要、快照生成与清理；扫描循环与切换在 `server/plugins.py` |
 | `src/powercontext/server/plugins.py` | 待修改 | `PluginManager` 增加新增、更新、移除的切换逻辑；插件记录增加版本信息 |
 | `src/powercontext/server/plugin_hosts.py` | 待修改 | 宿主进程替换：新进程就绪后切换，旧进程排空后停止 |
 | `openapi/powercontext.yaml` | 待修改 | 插件接口描述；`/v1/plugins` 的版本字段 |
@@ -113,7 +113,7 @@ class ScanState:
 
 1. 复制到 `<数据目录>/plugin-versions/<插件名>/.tmp-<随机串>/`，跳过 `__pycache__`；
 2. 对临时目录重新计算摘要，与扫描得到的摘要不一致则放弃本轮（复制期间目录又被修改）；
-3. 把文件设为只读（文件 `0444`，目录 `0555`）；
+3. 把文件设为只读（`0444`）；目录保持所有者可写（`0755`），删除数据目录时普通工具仍能删掉快照；
 4. 改名为 `<版本摘要>/`；目标已存在时删除临时目录，直接使用已有快照。
 
 ### 3.3 使用
@@ -125,8 +125,9 @@ class ScanState:
 
 ### 3.4 引用与清理
 
-`PluginManager` 为每个快照维护进程内引用计数：当前版本计 1；每个运行中的宿主进程计 1；每个已派发、尚未完成的 Worker
-计 1。扫描末尾删除引用计数为 0 的快照。
+扫描末尾删除本进程创建、且满足以下条件的快照：不是任何插件的当前版本；没有本进程中正在排空的旧宿主进程使用它；距离
+最后一次从它派发 Worker 已超过该插件的 Worker 时限加 60 秒。Worker 运行不会超过时限，因此不需要跟踪每个 Worker 的
+结束。
 
 Server 启动时，在第一次扫描生成当前快照之后，删除 `plugin-versions/` 下所有其他快照和残留的临时目录。多个 Server 进程
 共用一个数据目录时（同机多实例），每个进程只删除自己创建且不再使用的快照；启动清理只删除修改时间早于本进程启动时间的
@@ -163,7 +164,7 @@ Server 启动时，在第一次扫描生成当前快照之后，删除 `plugin-v
 ### 4.4 移除
 
 注销 Source 类型、family、合并注册、路由、页面和 binding（`replace_binding(name, None)`）；停止接收该插件的新同步调用；等待
-进行中的同步调用结束或超时后停止宿主进程；当前快照的引用计数减 1。
+进行中的同步调用结束或超时后停止宿主进程；快照按 §3.4 的规则在之后的扫描中删除。
 
 ### 4.5 宿主进程替换
 
@@ -173,7 +174,7 @@ Server 启动时，在第一次扫描生成当前快照之后，删除 `plugin-v
   -> 就绪：PluginHostHandle 原子替换为新进程；新请求发往新进程
   -> 旧进程标记为 draining：不再接收请求；进行中的请求完成后发送 shutdown；
      任一请求超过其时限时终止旧进程
-  -> 旧进程退出后，旧快照引用计数减 1
+  -> 旧进程退出后，旧快照按 §3.4 的规则在之后的扫描中删除
 ```
 
 宿主进程处于重启退避、当前没有运行时，只更新快照，退避结束后直接从新快照启动。
@@ -256,14 +257,14 @@ Server 只做不需要插件、也不需要权限服务的部分：找到插件�
 
 错误响应使用 Server 的统一错误格式。
 
-### 5.4 OpenAPI（未实现）
+### 5.4 OpenAPI
 
 `GET /v1/plugins/{name}/openapi.json` 由路由表生成：每条路由一个 operation，`operationId` 为 `<name>__<handler>`；
 `request_model`、`response_model` 的 JSON Schema 来自检查子进程导出的声明；`binary` 请求体为
 `application/octet-stream`；统一加入 401、403、404、413、422、500、503、504 的错误响应；扩展字段
 `x-powercontext-access` 记录 `access` 与 `scope_param`。
 
-### 5.5 MCP 工具（未实现）
+### 5.5 MCP 工具
 
 - 现有的 `create_mcp_server` 在启动时从 Server 的 OpenAPI 文档生成工具，经内部桥接（`_InternalBridgeTransport`）调用
   HTTP 路由。插件工具复用同一桥接：每个 `mcp=True` 的路由生成一个工具，调用时以 MCP 会话的认证信息请求
@@ -272,9 +273,9 @@ Server 只做不需要插件、也不需要权限服务的部分：找到插件�
   `response_model` 的 JSON Schema。
 - 注解：`GET` 且 `access` 为 `scope.read` 或 `authenticated` 时 `readOnlyHint=True`、`idempotentHint=True`；其他路由
   `readOnlyHint=False`。`openWorldHint` 均为 `False`。
-- 热加载：切换完成后调用 FastMCP 3.4 的 `add_tool` / `remove_tool`，`tools/list` 总是返回当前工具。FastMCP 的工具列表
-  变化通知只能在某个会话的请求上下文中发送，热加载发生在请求之外；实现时在会话的下一次请求中补发通知，做不到时客户端
-  在下一次列出工具时看到变化。
+- 热加载：插件工具由一个 FastMCP `Provider` 提供，每次 `tools/list` 和调用时从当前已加载的插件生成，切换后立即反映。
+  Server 的 MCP 端点是无状态 HTTP（`stateless_http=True`），没有可以推送工具列表变化通知的会话，客户端在下一次列出
+  工具时看到变化。
 - 工具名为 `<插件名>__<handler>`，插件名原样保留。插件名不含下划线，第一个双下划线之前就是插件名，不同插件的工具名不会
   相撞；超过 64 个字符或与内置工具重名时，该插件检查失败。
 
@@ -394,7 +395,7 @@ Server 同源；`Origin: null` 一律拒绝，返回 403。插件未加载或未
 
 | 项 | 默认值 | 配置 |
 | --- | --- | --- |
-| 扫描间隔（待实现） | 60 秒 | `POWERCONTEXT_SERVER_PLUGINS_RESCAN_SECONDS`（0 关闭热加载） |
+| 扫描间隔 | 60 秒 | `POWERCONTEXT_SERVER_PLUGINS_RESCAN_SECONDS`（0 关闭热加载） |
 | 稳定判断 | 连续 2 轮摘要相同 | 固定 |
 | 宿主进程就绪超时 | 60 秒 | 固定 |
 | 路由默认时限 | 30 秒 | 声明 `timeout_seconds` |
@@ -402,7 +403,7 @@ Server 同源；`Origin: null` 一律拒绝，返回 403。插件未加载或未
 | 二进制请求体上限 | 32 MiB | 路由 `max_body_bytes`，不超过 `POWERCONTEXT_SERVER_PLUGIN_API_MAX_BODY_BYTES` |
 | 每个插件的路由数 | 至多 200 | 固定 |
 | 页面静态文件上限 | 5 MiB | 固定 |
-| 数据升级时限（待实现） | 600 秒 | 声明 `upgrade_timeout_seconds` |
+| 数据升级时限 | 600 秒 | 声明 `upgrade_timeout_seconds` |
 
 ---
 
@@ -410,17 +411,17 @@ Server 同源；`Origin: null` 一律拒绝，返回 403。插件未加载或未
 
 | # | 任务 | 依赖 | 状态 |
 | --- | --- | --- | --- |
-| T1 | 扫描循环、版本摘要、稳定判断 | RFC #2549 实现（#2616） | 待实现 |
-| T2 | 版本快照：生成、只读、引用计数、清理；检查子进程、宿主进程、Worker 改为从快照导入 | T1 | 待实现 |
-| T3 | 切换：新增、更新、移除；声明差异的注册与注销；宿主进程替换 | T2 | 待实现 |
+| T1 | 扫描循环、版本摘要、稳定判断 | RFC #2549 实现（#2616） | #2638 已完成 |
+| T2 | 版本快照：生成、只读、保留与清理；检查子进程、宿主进程、Worker 改为从快照导入 | T1 | #2638 已完成 |
+| T3 | 切换：新增、更新、移除；声明差异的注册与注销；宿主进程替换 | T2 | #2638 已完成 |
 | T4 | 插件路由：声明、匹配、授权、请求体、响应映射、二进制文件交换 | RFC #2549 实现（#2616） | #2616 已完成 |
 | T5 | 处理函数能力：`require`、`reads`、`writer`、`sources.submit`、`scopes`，在宿主进程中本地实现 | T4 | #2616 已完成 |
-| T6 | 插件 OpenAPI 生成 | T4 | 待实现 |
+| T6 | 插件 OpenAPI 生成 | T4 | #2638 已完成 |
 | T7 | 插件页面：静态文件、宿主页面、转发、`_client.js` | T4 | #2616 已完成 |
-| T8 | `/v1/plugins` 响应字段与可观测性 | T3、T4 | 待实现 |
+| T8 | `/v1/plugins` 响应字段与可观测性 | T3、T4 | #2638 已完成 |
 | T9 | 浏览器验证：CSP `sandbox` 下 `'self'` 的匹配、不透明来源请求的 cookie 行为，在 Chromium、Firefox、Safari 上执行 | T7 | Chromium 已手动验证；Firefox、Safari 待验证 |
-| T10 | MCP 工具：生成、注解、热加载时增删与通知 | T3、T4 | 待实现 |
-| T11 | 数据升级：宿主进程启动时执行 `upgrade`、插件身份上下文、`upgrade_failed` 的处理、binding 等待就绪 | T3、T5 | 待实现 |
+| T10 | MCP 工具：生成、注解、热加载时增删与通知 | T3、T4 | #2638 已完成 |
+| T11 | 数据升级：宿主进程启动时执行 `upgrade`、插件身份上下文、`upgrade_failed` 的处理、binding 等待就绪 | T3、T5 | #2638 已完成 |
 
 ---
 
@@ -446,8 +447,8 @@ RFC #2549 设计 §16 的 D1、D2。
 | E3 | 插件接口的二进制请求体与响应以 bytes 直接经 `Pipe` 传递，受同一上限约束（§5.2） | 随 RFC #2549 设计 D1；不需要临时文件及其清理。代价是单个请求的峰值内存约为上限的两倍 | 已采用 |
 | E4 | 插件接口的授权和 `ctx` 上的全部能力在宿主进程本地实现，Server 只找路由、认证和限制请求大小（§5.1、§6） | 随 RFC #2549 设计 D2；不需要回调通道 | 已采用 |
 | E5 | 路由匹配时无参数的路径优先，其次按声明顺序（§5.1） | 与常见 Web 框架一致，避免参数路径吞掉固定路径 | 已采用 |
-| E6 | OpenAPI 的 `operationId` 与 MCP 工具名都是 `<插件名>__<handler>`（§5.4、§5.5） | 稳定、可预测，便于对照；插件名不含下划线，以双下划线分隔不会撞名 | 待实现 |
-| E7 | MCP 工具复用现有的内部 HTTP 桥接，鉴权走 HTTP 路由本身（§5.5） | 与内置工具一致，不另写一套鉴权 | 待实现 |
+| E6 | OpenAPI 的 `operationId` 与 MCP 工具名都是 `<插件名>__<handler>`（§5.4、§5.5） | 稳定、可预测，便于对照；插件名不含下划线，以双下划线分隔不会撞名 | 已采用 |
+| E7 | MCP 工具复用现有的内部 HTTP 桥接，鉴权走 HTTP 路由本身（§5.5） | 与内置工具一致，不另写一套鉴权 | 已采用 |
 | E8 | 插件页面跳转或刷新后停止转发并提示用户重新打开（§7.3） | 页面跳转后无法区分插件页面与外部页面 | 已采用 |
 | E9 | 静态文件设 `no-cache`（§7.2） | 插件更新后浏览器立即取到新文件；热加载实现后可加上以版本摘要为前缀的 ETag | 已采用 |
 | E10 | 接收请求的实例在新宿主进程中、`setup` 之前执行 `upgrade`；`background` 实例用只执行 `upgrade` 的短时子进程（§4.7） | 宿主进程本来就要在使用新版本前启动，复用它的运行时和资源；`background` 实例没有宿主进程，又要保证新 `generate` 运行在升级后的数据上。执行失败沿用保留旧版本的流程 | 待确认 |
