@@ -65,7 +65,8 @@ Source 类型、插件接口、Dashboard 页面、专属存储和模型调用。
 | `POST /knowledge-bases/{kb_id}/processing` | 用指定解析方式处理待配置的文档，或用 `document_ids` 重新处理指定文档 |
 | `GET /knowledge-bases/{kb_id}/documents`、`GET .../documents/{document_id}` | 文档列表和状态（`pending_config`、`processing`、`ready`、`failed`） |
 | `GET .../documents/{document_id}/content` | 下载原文件 |
-| `GET/PUT .../documents/{document_id}/chunks` | 查看（可带 `revision`）和编辑切块 |
+| `GET/PUT .../documents/{document_id}/chunks` | 查看（可带 `revision`）和编辑切块；编辑在后台生效，响应带 `edit_id` |
+| `GET .../documents/{document_id}/edits/{edit_id}` | 编辑的状态：`pending`、`applied`，或者文档已被修改时的 `discarded` |
 | `POST .../documents/{document_id}/restorations` | 恢复到指定版本 |
 | `DELETE .../documents/{document_id}` | 撤销未处理的上传，或删除文档 |
 | `GET /parsers` | 可用的解析方式和参数 |

@@ -201,6 +201,9 @@ def test_knowledge_bases_hide_scopes_and_process_uploads_with_the_chosen_parser(
                 log=log,
             )
             assert (applied["keys.txt"]["edited"], applied["keys.txt"]["chunk_count"]) == (True, 1)
+            edits_path = f"{documents_path}/{keys}/edits"
+            first_status = await ok(await client.get(f"{edits_path}/{submitted_edit['edit_id']}"))
+            assert first_status["status"] == "applied"
             assert (await search(client, "keyctl", [kb], mode="keyword"))[0][0] == "keys.txt"
             await ok(await client.put(chunks_path, json=edit), 409)
             # The edited revision's provenance is the edit Source, which records the editor.
@@ -215,11 +218,16 @@ def test_knowledge_bases_hide_scopes_and_process_uploads_with_the_chosen_parser(
             payload = stored_edit["content"]["payload"]
             assert (payload["base_revision"], payload["edited_by"]) == (1, "service:server-token")
             # Two edits of the same revision: the first applies, the second finds the document changed and is dropped.
-            for text in ("First edit wins.", "Second edit is dropped."):
+            competing = [
                 await ok(await client.put(chunks_path, json={"expected_revision": 2, "chunks": [{"text": text}]}))
+                for text in ("First edit wins.", "Second edit is dropped.")
+            ]
             settled = await wait_for(
                 lambda: documents(client, kb), lambda value: value["keys.txt"]["status"] == "ready", log=log
             )
+            # The caller learns which edit was dropped by querying its status.
+            outcomes = [(await ok(await client.get(f"{edits_path}/{item['edit_id']}")))["status"] for item in competing]
+            assert outcomes == ["applied", "discarded"]
             assert settled["keys.txt"]["revision"] == 3
             assert [chunk["text"] for chunk in (await ok(await client.get(chunks_path)))["chunks"]] == [
                 "First edit wins."

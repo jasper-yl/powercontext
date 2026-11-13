@@ -75,7 +75,8 @@ Every route is under `/v1/plugins/knowledge-base/api` and uses the same credenti
 | `POST /knowledge-bases/{kb_id}/processing` | Process waiting documents with a parser, or reprocess the documents in `document_ids` |
 | `GET /knowledge-bases/{kb_id}/documents`, `GET .../documents/{document_id}` | Documents and their status (`pending_config`, `processing`, `ready`, `failed`) |
 | `GET .../documents/{document_id}/content` | Download the original file |
-| `GET/PUT .../documents/{document_id}/chunks` | View (optionally at a `revision`) and edit chunks |
+| `GET/PUT .../documents/{document_id}/chunks` | View (optionally at a `revision`) and edit chunks; an edit applies in the background and the response carries its `edit_id` |
+| `GET .../documents/{document_id}/edits/{edit_id}` | An edit's status: `pending`, `applied`, or `discarded` when the document changed first |
 | `POST .../documents/{document_id}/restorations` | Restore a revision |
 | `DELETE .../documents/{document_id}` | Withdraw an unprocessed upload, or delete the document |
 | `GET /parsers` | Available parsers and their parameters |
