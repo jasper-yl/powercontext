@@ -33,7 +33,7 @@
 | `scopes` | 条件：有 `Interval` 但没有 `inputs` 时 | `None` | 服务的 Scope 名单 | #2549 |
 | `definitions` | 否 | `()` | 插件自带的 Source 定义 | #2549 |
 | `max_workers` | 否 | 1 | 跨 Scope 的并发上限 | #2549 |
-| `host_processes` | 否 | 1 | 每个 Server 进程中本插件宿主进程数的建议上限，部署者可以覆盖（未实现） | #2549 |
+| `host_processes` | 否 | 1 | 每个 Server 进程中本插件宿主进程数的建议上限，部署者可以覆盖 | #2549 |
 | `timeout_seconds` | 否 | 300 | 一次后台生成的时限 | #2549 |
 | `transaction_timeout_seconds` | 否 | 30 | 写事务块的时限 | #2549 |
 | `change_timeout_seconds` | 否 | 30 | 一次用户修改、展示或检索的时限 | #2549 |
@@ -122,7 +122,7 @@ Source 插件的契约由 RFC #2617 规定，尚未实现，这里只列出接�
 | 声明、检查子进程、代码指纹、注册 | #2616 已实现 | §4 |
 | Worker 执行器、写入器、写事务块 | #2616 已实现 | §5、§6 |
 | 宿主进程、用户修改、展示、检索、Prepared Context | #2616 已实现 | §7、§8 |
-| 宿主进程组（按负载增减、总上限）、超时只取消单个请求、心跳、Prepared Context 省略不可用插件、`Cron` 默认机器时区 | 未实现 | §7.1、§7.3、§8.5 |
+| 宿主进程组（按负载增减、总上限）、超时只取消单个请求、心跳、Prepared Context 省略不可用插件、`Cron` 默认机器时区 | #2616 已实现 | §7.1、§7.3、§8.5 |
 | 插件自带 Source 类型 | #2616 已实现 | §8.6 |
 | 专属存储 | #2616 已实现 SQLite；OceanBase / seekdb 未实现 | §9.1 |
 | 模型 | #2616 已实现 | §9.2 |
@@ -318,8 +318,9 @@ Server 进程只负责认证调用者和转发请求，鉴权、版本预检和�
   请求，并一直保留；请求到达时尚未就绪则等待，等待时间计入请求时限。
 - 进程组按负载增减：本插件所有进程的并发槽位都占满、且有请求排队时，再启动一个，直到本插件的上限；多出的进程空闲 5 分钟
   后发送 `HostShutdown` 停止。本插件的上限取声明中的 `host_processes`，`POWERCONTEXT_SERVER_PLUGIN_HOST_PROCESSES`（按
-  插件名的 JSON）可以覆盖；所有插件的宿主进程总数不超过 `POWERCONTEXT_SERVER_PLUGIN_HOST_PROCESSES_TOTAL`，达到总上限时
-  不再启动，请求在已有进程上排队。请求分给进行中请求最少的进程。
+  插件名的 JSON）可以覆盖；所有插件的宿主进程总数不超过 `POWERCONTEXT_SERVER_PLUGIN_TOTAL_HOST_PROCESSES`，达到总上限时
+  不再为负载启动新进程，请求在已有进程上排队；每个插件常驻的第一个进程不受总上限限制，使每个加载成功的插件都可用。
+  （两个变量名互不为前缀：Server 设置以 `_` 作为嵌套分隔符，`..._HOST_PROCESSES_TOTAL` 会被读成前者 JSON 中的键。）请求分给进行中请求最少的进程。
 - 启动方式：`multiprocessing.get_context("spawn")` 启动全新解释器，不继承 Server 进程已导入的模块。
 - 启动参数 `PluginHostSpec` 可以 pickle：数据库配置、插件目录、`PluginManifest`、权限配置、推理配置、所有已加载插件的
   family 和 Source binding、专属存储的根目录。
@@ -445,7 +446,7 @@ Artifact 不存在时 404。
 - 宿主进程检查调用者的 `scope.read`，然后逐条核对插件返回的命中：family 必须是本插件的，否则为 `contract_violation`；
   只保留 revision 等于当前 revision 且状态为 `active` 的命中，保持插件给出的顺序。
 - Server 按调用者的读取权限组装响应，是否带分数由 `include_scores` 决定。
-- Prepared Context 中插件不可用（宿主进程不可用、超时或检索失败）时，省略该 section，在回执中记录省略的原因，其他
+- Prepared Context 中插件不可用（宿主进程不可用、超时或检索失败）时，省略该 section，在回执的检索记录中把该 family 记为 `failed`，其他
   section 照常返回。权限过滤后的命中可能少于 `limit`，core 不补取。
 - `POST /v1/context/prepare` 的章节可以列出实现了检索的插件 family：core 以请求的查询和章节的 `limit` 调用
   `search_artifacts`，章节的 `search` 中的其他通用检索字段（如 `mode`、过滤条件）原样透传，同时传入 `max_bytes`。既不是
@@ -564,7 +565,7 @@ Artifact 不存在时 404。
 | 用户修改、展示、检索时限 | 30 秒 | 声明 `change_timeout_seconds` |
 | 宿主进程并发请求数 | 8 | 固定 |
 | 每个插件的宿主进程上限 | 1 | 声明 `host_processes`；`POWERCONTEXT_SERVER_PLUGIN_HOST_PROCESSES` |
-| 宿主进程总上限 | 待定 | `POWERCONTEXT_SERVER_PLUGIN_HOST_PROCESSES_TOTAL` |
+| 宿主进程总上限 | 不设；每个插件的第一个进程不计入限制 | `POWERCONTEXT_SERVER_PLUGIN_TOTAL_HOST_PROCESSES` |
 | 多出的宿主进程空闲停止 | 5 分钟 | 固定 |
 | 心跳间隔 / 失去响应判定 | 1 秒 / 5 秒 | 固定 |
 | 宿主进程就绪等待 | 60 秒 | 固定 |

@@ -36,7 +36,7 @@ configuration.
 | `scopes` | Conditional: with an `Interval` and no `inputs` | `None` | The Scopes served | #2549 |
 | `definitions` | No | `()` | The plugin's own Source Definitions | #2549 |
 | `max_workers` | No | 1 | Concurrency across Scopes | #2549 |
-| `host_processes` | No | 1 | Suggested limit on this plugin's host processes in each Server process; deployers can override it (not implemented) | #2549 |
+| `host_processes` | No | 1 | Suggested limit on this plugin's host processes in each Server process; deployers can override it | #2549 |
 | `timeout_seconds` | No | 300 | Time limit of one background generation | #2549 |
 | `transaction_timeout_seconds` | No | 30 | Time limit of the write transaction block | #2549 |
 | `change_timeout_seconds` | No | 30 | Time limit of one user change, rendering, or search | #2549 |
@@ -129,7 +129,7 @@ comparison:
 | Declarations, check child process, code fingerprint, registration | Implemented in #2616 | §4 |
 | Worker executor, writer, write transaction block | Implemented in #2616 | §5, §6 |
 | Host process, user changes, rendering, search, Prepared Context | Implemented in #2616 | §7, §8 |
-| Host process groups (scaling with load, total limit), timeouts cancelling one request, heartbeats, Prepared Context omitting unavailable plugins, `Cron` defaulting to the machine time zone | Not implemented | §7.1, §7.3, §8.5 |
+| Host process groups (scaling with load, total limit), timeouts cancelling one request, heartbeats, Prepared Context omitting unavailable plugins, `Cron` defaulting to the machine time zone | Implemented in #2616 | §7.1, §7.3, §8.5 |
 | Plugin-provided Source types | Implemented in #2616 | §8.6 |
 | Dedicated storage | SQLite implemented in #2616; OceanBase / seekdb not implemented | §9.1 |
 | Models | Implemented in #2616 | §9.2 |
@@ -343,8 +343,10 @@ authenticates callers and forwards requests; authorization, revision prechecks, 
 - The group scales with load: when every concurrency slot of the plugin's processes is taken and requests are queuing,
   another process starts, up to the plugin's limit; extra processes receive `HostShutdown` after 5 idle minutes. The
   plugin's limit is its declared `host_processes`, which `POWERCONTEXT_SERVER_PLUGIN_HOST_PROCESSES` (JSON keyed by plugin
-  name) can override; host processes of all plugins together stay within `POWERCONTEXT_SERVER_PLUGIN_HOST_PROCESSES_TOTAL`,
-  and at that limit no new process starts and requests queue on existing ones. Requests go to the process with the fewest
+  name) can override; host processes of all plugins together stay within `POWERCONTEXT_SERVER_PLUGIN_TOTAL_HOST_PROCESSES`,
+  and at that limit no process starts for load and requests queue on existing ones; each plugin's first, always-running
+  process is exempt, so every loaded plugin stays available. (Neither variable name prefixes the other: Server settings
+  nest on `_`, so `..._HOST_PROCESSES_TOTAL` would be read as a key of the former's JSON.) Requests go to the process with the fewest
   in flight.
 - Start method: `multiprocessing.get_context("spawn")` starts a fresh interpreter that inherits no modules the Server
   process imported.
@@ -479,7 +481,7 @@ plain text) with the revision reference; a missing Artifact returns 404.
   `contract_violation`; only hits whose revision is current and `active` are kept, in the plugin's order.
 - The Server assembles the response under the caller's read permission; `include_scores` decides whether scores appear.
 - When a plugin is unavailable in Prepared Context (no usable host process, a timeout, or a failed search), its section
-  is omitted and the reason recorded in the receipt; other sections return as usual. Hits after permission filtering may
+  is omitted and the receipt's search record marks the family `failed`; other sections return as usual. Hits after permission filtering may
   number fewer than `limit`; core does not fetch more.
 - `POST /v1/context/prepare` sections may list plugin families that implement search: core calls `search_artifacts` with
   the request's query and the section's `limit`, passes the other generic search fields in the section's `search` (such
@@ -611,7 +613,7 @@ registered; the plan:
 | User change, rendering, and search time limit | 30 seconds | Declaration `change_timeout_seconds` |
 | Concurrent requests per host process | 8 | Fixed |
 | Host process limit per plugin | 1 | Declaration `host_processes`; `POWERCONTEXT_SERVER_PLUGIN_HOST_PROCESSES` |
-| Total host process limit | To decide | `POWERCONTEXT_SERVER_PLUGIN_HOST_PROCESSES_TOTAL` |
+| Total host process limit | None; each plugin's first process does not count | `POWERCONTEXT_SERVER_PLUGIN_TOTAL_HOST_PROCESSES` |
 | Idle stop of extra host processes | 5 minutes | Fixed |
 | Heartbeat interval / loss-of-response threshold | 1 second / 5 seconds | Fixed |
 | Host process readiness wait | 60 seconds | Fixed |

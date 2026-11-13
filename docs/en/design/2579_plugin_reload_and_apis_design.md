@@ -272,7 +272,7 @@ single request's peak memory is about twice the limit.
 | `ctx.require` or write authorization fails | 403 |
 | `request_model` validation fails or `InvalidContent` | 422 |
 | Any other exception | 500; only the exception type is logged |
-| `timeout_seconds` exceeded | 504; only that request is cancelled (see RFC #2549 design §7.3, not implemented; currently 503 with the host process replaced) |
+| `timeout_seconds` exceeded | 504; only that request is cancelled (see RFC #2549 design §7.3) |
 | Host process unavailable, in backoff, or other requests of a process terminated for loss of response | 503 |
 
 Error responses use the Server's standard error format.
