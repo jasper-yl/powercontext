@@ -556,6 +556,7 @@ from powercontext.http import (
     MemoryMutationResponse,
     MergeArtifactsRequest,
     PlanAccessOwnershipRequest,
+    PluginOpenApiDocument,
     PluginPage,
     PluginScopePage,
     PluginState,
@@ -792,6 +793,7 @@ from powercontext.http._generated.operations import (
     GET_MEMORY_ENTRY,
     GET_MEMORY_ENTRY_TAGS,
     GET_PLUGIN,
+    GET_PLUGIN_OPENAPI,
     GET_PROFILE_POLICY,
     GET_PROMPT_CONFIGURATION,
     GET_READINESS,
@@ -1596,6 +1598,7 @@ def create_app(
     _add_route(app, GET_CAPABILITIES, get_capabilities)
     _add_route(app, LIST_PLUGINS, list_plugins)
     _add_route(app, GET_PLUGIN, get_plugin)
+    _add_route(app, GET_PLUGIN_OPENAPI, get_plugin_openapi)
     # Plugin routes are outside the main contract; core authenticates, the plugin host authorizes.
     app.router.add_api_route(
         "/v1/plugins/{name}/api/{path:path}",
@@ -1849,6 +1852,12 @@ async def get_plugin(
     name: Annotated[str, Path(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9-]*$")], http_request: Request
 ) -> PluginState:
     return _require_plugin_manager(http_request).get(name)
+
+
+async def get_plugin_openapi(
+    name: Annotated[str, Path(min_length=1, max_length=64, pattern=r"^[a-z][a-z0-9-]*$")], http_request: Request
+) -> PluginOpenApiDocument:
+    return PluginOpenApiDocument.model_validate(_require_plugin_manager(http_request).openapi(name))
 
 
 def _list_plugin_scopes_query(
