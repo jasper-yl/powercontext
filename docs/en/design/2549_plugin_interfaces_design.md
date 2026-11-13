@@ -31,11 +31,12 @@ configuration.
 | `family` | Yes | — | The Artifact family the plugin owns; must not repeat a built-in family or another plugin's | #2549 |
 | `setup` | Yes | — | Async factory returning the plugin object; runs once per Worker invocation, and once per host process, which reuses it | #2549 |
 | `inputs` | Conditional: when consuming Sources | `None` | `Inputs(source_types, projection, projections, max_sources=50)` | #2549 |
-| `schedule` | No | `None` | `Interval` or `Cron`; `Cron` needs `inputs` and cannot combine with `on_sources` | #2549 |
+| `schedule` | No | `None` | `Interval` or `Cron`; `Cron` needs `inputs` and cannot combine with `on_sources`; a `Cron` time zone defaults to that of the machine running Server | #2549 |
 | `on_sources` | No | `False` | Run when new Sources arrive; needs `inputs` | #2549 |
 | `scopes` | Conditional: with an `Interval` and no `inputs` | `None` | The Scopes served | #2549 |
 | `definitions` | No | `()` | The plugin's own Source Definitions | #2549 |
 | `max_workers` | No | 1 | Concurrency across Scopes | #2549 |
+| `host_processes` | No | 1 | Suggested limit on this plugin's host processes in each Server process; deployers can override it (not implemented) | #2549 |
 | `timeout_seconds` | No | 300 | Time limit of one background generation | #2549 |
 | `transaction_timeout_seconds` | No | 30 | Time limit of the write transaction block | #2549 |
 | `change_timeout_seconds` | No | 30 | Time limit of one user change, rendering, or search | #2549 |
@@ -128,6 +129,7 @@ comparison:
 | Declarations, check child process, code fingerprint, registration | Implemented in #2616 | §4 |
 | Worker executor, writer, write transaction block | Implemented in #2616 | §5, §6 |
 | Host process, user changes, rendering, search, Prepared Context | Implemented in #2616 | §7, §8 |
+| Host process groups (scaling with load, total limit), timeouts cancelling one request, heartbeats, Prepared Context omitting unavailable plugins, `Cron` defaulting to the machine time zone | Not implemented | §7.1, §7.3, §8.5 |
 | Plugin-provided Source types | Implemented in #2616 | §8.6 |
 | Dedicated storage | SQLite implemented in #2616; OceanBase / seekdb not implemented | §9.1 |
 | Models | Implemented in #2616 | §9.2 |
@@ -335,9 +337,15 @@ The host process is **core runtime plus the plugin**: like a Worker, it builds i
 service, and needed core services from configuration, then loads the plugin on top. The Server process only
 authenticates callers and forwards requests; authorization, revision prechecks, and writes happen in the host process.
 
-- Each Server process keeps one host process per successfully loaded plugin and starts it in the background right after
-  loading, without waiting for the first request. A request that arrives before the host process is ready waits, and the
-  wait counts toward the request's time limit.
+- Each Server process keeps a group of host processes per successfully loaded plugin, and plugins never share a process.
+  The first starts in the background right after loading, without waiting for the first request, and always stays; a
+  request that arrives before it is ready waits, and the wait counts toward the request's time limit.
+- The group scales with load: when every concurrency slot of the plugin's processes is taken and requests are queuing,
+  another process starts, up to the plugin's limit; extra processes receive `HostShutdown` after 5 idle minutes. The
+  plugin's limit is its declared `host_processes`, which `POWERCONTEXT_SERVER_PLUGIN_HOST_PROCESSES` (JSON keyed by plugin
+  name) can override; host processes of all plugins together stay within `POWERCONTEXT_SERVER_PLUGIN_HOST_PROCESSES_TOTAL`,
+  and at that limit no new process starts and requests queue on existing ones. Requests go to the process with the fewest
+  in flight.
 - Start method: `multiprocessing.get_context("spawn")` starts a fresh interpreter that inherits no modules the Server
   process imported.
 - The start argument `PluginHostSpec` is picklable: database configuration, plugin directory, `PluginManifest`, access
@@ -354,7 +362,9 @@ authenticates callers and forwards requests; authorization, revision prechecks, 
      send `HostFailed(permanent=True)`; the plugin is `failed` and is not restarted;
   7. send `HostReady(implemented=...)` with the user-change methods the plugin implements.
 - The host process is a single asyncio event loop and can serve requests concurrently; the Server side limits each host
-  process to 8 concurrent requests with a semaphore, and queued requests count their wait toward their time limit.
+  process to 8 concurrent requests with a semaphore, and queued requests count their wait toward their time limit. The
+  host process sends `HostHeartbeat` every second from a task on its event loop, so a blocked event loop stops the
+  heartbeat.
 
 ### 7.2 Communication
 
@@ -387,18 +397,19 @@ class HostResponse:
     error_type: str | None = None
 ```
 
-Three control messages complete the protocol: `HostReady`, `HostFailed`, and `HostShutdown`. On the Server side,
+Control messages complete the protocol: `HostReady`, `HostFailed`, `HostShutdown`, `HostHeartbeat`, and `HostCancel(id)`. On the Server side,
 `PluginHost` reads the `Pipe` in a background task and hands each response to the waiting request by `id`.
 
 ### 7.3 Timeouts, failures, and restarts
 
 | Situation | Handling |
 | --- | --- |
-| A request exceeds its time limit | Terminate the whole host process (`terminate`, then `kill` after 5 seconds); every in-flight request returns 503 |
-| The process exits or the `Pipe` closes | Same as above |
+| A request exceeds its time limit | The Server sends `HostCancel(id)` and the host process cancels that request's task; its write transaction rolls back, the request returns 504, and other requests are unaffected |
+| No heartbeat for more than 5 seconds | Treated as loss of response: terminate the host process (`terminate`, then `kill` after 5 seconds); timed-out requests return 504 and other in-flight requests return 503 |
+| The process exits or the `Pipe` closes | In-flight requests return 503 |
 | Waiting for readiness exceeds the request's time limit | That request returns 503 |
 | Restart | In the background after a backoff that starts at 1 second, doubles each time, caps at 60 seconds, and resets after 5 minutes of running |
-| During backoff | Synchronous calls to the plugin return 503; background invocations are unaffected |
+| During backoff | With no other usable process of the plugin, synchronous calls return 503; background invocations are unaffected |
 | Permanent failure (`HostFailed(permanent=True)`) | No restart; the plugin is `failed` |
 | Server stops | Send `HostShutdown`, wait up to 10 seconds, then terminate |
 
@@ -467,6 +478,9 @@ plain text) with the revision reference; a missing Artifact returns 404.
 - The host process checks the caller's `scope.read`, then checks each hit the plugin returns: a hit of another family is a
   `contract_violation`; only hits whose revision is current and `active` are kept, in the plugin's order.
 - The Server assembles the response under the caller's read permission; `include_scores` decides whether scores appear.
+- When a plugin is unavailable in Prepared Context (no usable host process, a timeout, or a failed search), its section
+  is omitted and the reason recorded in the receipt; other sections return as usual. Hits after permission filtering may
+  number fewer than `limit`; core does not fetch more.
 - `POST /v1/context/prepare` sections may list plugin families that implement search: core calls `search_artifacts` with
   the request's query and the section's `limit`, passes the other generic search fields in the section's `search` (such
   as `mode` and filters) unchanged, and passes `max_bytes`. A family that is neither built-in nor a plugin family with
@@ -497,7 +511,8 @@ plain text) with the revision reference; a missing Artifact returns 404.
 | `model_unavailable` | 503 | `model_unavailable` |
 | `api_error` | The plugin's 4xx | The plugin's code |
 | `error` | 500; only the exception type is logged | `plugin_error` |
-| Timeout, host process unavailable, or in backoff | 503 | `plugin_unavailable` |
+| The request exceeds its time limit | 504 | `plugin_timeout` |
+| Host process unavailable, in backoff, or other requests of a process terminated for loss of response | 503 | `plugin_unavailable` |
 
 ---
 
@@ -595,6 +610,10 @@ registered; the plan:
 | Background generation time limit | 300 seconds | Declaration `timeout_seconds` |
 | User change, rendering, and search time limit | 30 seconds | Declaration `change_timeout_seconds` |
 | Concurrent requests per host process | 8 | Fixed |
+| Host process limit per plugin | 1 | Declaration `host_processes`; `POWERCONTEXT_SERVER_PLUGIN_HOST_PROCESSES` |
+| Total host process limit | To decide | `POWERCONTEXT_SERVER_PLUGIN_HOST_PROCESSES_TOTAL` |
+| Idle stop of extra host processes | 5 minutes | Fixed |
+| Heartbeat interval / loss-of-response threshold | 1 second / 5 seconds | Fixed |
 | Host process readiness wait | 60 seconds | Fixed |
 | Host process restart backoff | From 1 second, doubling, capped at 60 seconds; reset after 5 minutes of running | Fixed |
 | Host process stop wait | 10 seconds | Fixed |
@@ -620,7 +639,7 @@ registered; the plan:
 | Item | Notes |
 | --- | --- |
 | Dedicated storage on OceanBase / seekdb | A database per plugin needs the privilege to create databases; whether to fall back to plugin-prefixed tables in the core database without it |
-| Host process defaults | Concurrency and backoff need confirmation under load with real plugins |
+| Host process defaults | Concurrency, heartbeat threshold, total limit, and backoff need confirmation under load with real plugins |
 | Check concurrency | Plugins are checked one at a time, each about 0.6 seconds plus the plugin's own imports; whether to check concurrently when there are many plugins |
 
 ---
@@ -640,7 +659,7 @@ prescribe.
 | D6 | Reads outside the transaction record the earliest revision read of each Artifact; historical revision reads are not recorded (§6.3) | The earliest read is where the plugin's decision started |
 | D7 | A registered Source Definition manifest identical to the plugin's is the same definition; only different content is a conflict (§4.4) | Follows the existing manifest registration; the same plugin loading on several Server instances relies on it |
 | D8 | Workers create the dedicated storage engine per invocation; host processes reuse it (§9.1) | Matches the lifetime of the object `setup` returns |
-| D9 | A request timeout terminates the whole host process (§7.3) | asyncio cannot reliably interrupt a blocked request |
-| D10 | Every successfully loaded plugin's host process starts in the background in advance (§7.1) | Starting takes seconds and should not fall on the first request; every plugin has the required `render_artifact` and needs a host process |
+| D9 | A request timeout first cancels that request, and the host process is terminated only when its heartbeat stops (a blocked event loop); the timed-out request returns 504 and requests terminated with it return 503 (§7.3) | Cancellation works while the plugin awaits I/O, so other requests in the process need not be sacrificed; only a blocked event loop defeats cancellation, and then the process's other requests could not finish anyway |
+| D10 | Every successfully loaded plugin gets one host process started in advance and kept, more on demand under load and fewer when idle, within a total limit (§7.1) | Starting takes seconds and should not fall on the first request; every plugin has the required `render_artifact` and needs a host process. A group per plugin instead of a shared pool keeps blocking or crashes from spreading across plugins and leaves room for per-plugin dependency isolation; the total limit bounds memory |
 | D11 | Revisions written by plugins record the plugin name and code fingerprint in `metadata` (§10) | Troubleshooting and later upgrades can tell which version wrote each revision; it stays out of Artifact content and does not affect identity or deduplication |
 | D12 | Search results keep only current, `active` revisions, in the plugin's order (§8.5) | A plugin index may lag behind core data; core's current state wins, so stale or forgotten content never appears in results |

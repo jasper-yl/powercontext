@@ -28,11 +28,12 @@
 | `family` | 是 | — | 插件拥有的 Artifact family，不能与内置 family 或其他插件重复 | #2549 |
 | `setup` | 是 | — | async 工厂，返回插件对象；Worker 每次调用执行一次，宿主进程中执行一次后复用 | #2549 |
 | `inputs` | 条件：消费 Source 时 | `None` | `Inputs(source_types, projection, projections, max_sources=50)` | #2549 |
-| `schedule` | 否 | `None` | `Interval` 或 `Cron`；`Cron` 需要 `inputs`，且不能与 `on_sources` 同时使用 | #2549 |
+| `schedule` | 否 | `None` | `Interval` 或 `Cron`；`Cron` 需要 `inputs`，且不能与 `on_sources` 同时使用；`Cron` 的时区默认为 Server 所在机器的时区 | #2549 |
 | `on_sources` | 否 | `False` | 新 Source 到达后触发；需要 `inputs` | #2549 |
 | `scopes` | 条件：有 `Interval` 但没有 `inputs` 时 | `None` | 服务的 Scope 名单 | #2549 |
 | `definitions` | 否 | `()` | 插件自带的 Source 定义 | #2549 |
 | `max_workers` | 否 | 1 | 跨 Scope 的并发上限 | #2549 |
+| `host_processes` | 否 | 1 | 每个 Server 进程中本插件宿主进程数的建议上限，部署者可以覆盖（未实现） | #2549 |
 | `timeout_seconds` | 否 | 300 | 一次后台生成的时限 | #2549 |
 | `transaction_timeout_seconds` | 否 | 30 | 写事务块的时限 | #2549 |
 | `change_timeout_seconds` | 否 | 30 | 一次用户修改、展示或检索的时限 | #2549 |
@@ -121,6 +122,7 @@ Source 插件的契约由 RFC #2617 规定，尚未实现，这里只列出接�
 | 声明、检查子进程、代码指纹、注册 | #2616 已实现 | §4 |
 | Worker 执行器、写入器、写事务块 | #2616 已实现 | §5、§6 |
 | 宿主进程、用户修改、展示、检索、Prepared Context | #2616 已实现 | §7、§8 |
+| 宿主进程组（按负载增减、总上限）、超时只取消单个请求、心跳、Prepared Context 省略不可用插件、`Cron` 默认机器时区 | 未实现 | §7.1、§7.3、§8.5 |
 | 插件自带 Source 类型 | #2616 已实现 | §8.6 |
 | 专属存储 | #2616 已实现 SQLite；OceanBase / seekdb 未实现 | §9.1 |
 | 模型 | #2616 已实现 | §9.2 |
@@ -312,8 +314,12 @@ Worker 收到 (plugin:<name>, scope_id, request_generation)
 宿主进程是 **core 运行时加插件**：与 Worker 一样从配置自建数据库连接、权限服务和所需的 core 服务，在此之上加载插件。
 Server 进程只负责认证调用者和转发请求，鉴权、版本预检和写入都在宿主进程中完成。
 
-- 每个 Server 进程为每个加载成功的插件维护一个宿主进程，加载后立即在后台启动，不等第一个请求。请求到达时宿主进程尚未
-  就绪则等待，等待时间计入请求时限。
+- 每个 Server 进程为每个加载成功的插件维护一组宿主进程，不同插件不共用进程。加载后立即在后台启动第一个，不等第一个
+  请求，并一直保留；请求到达时尚未就绪则等待，等待时间计入请求时限。
+- 进程组按负载增减：本插件所有进程的并发槽位都占满、且有请求排队时，再启动一个，直到本插件的上限；多出的进程空闲 5 分钟
+  后发送 `HostShutdown` 停止。本插件的上限取声明中的 `host_processes`，`POWERCONTEXT_SERVER_PLUGIN_HOST_PROCESSES`（按
+  插件名的 JSON）可以覆盖；所有插件的宿主进程总数不超过 `POWERCONTEXT_SERVER_PLUGIN_HOST_PROCESSES_TOTAL`，达到总上限时
+  不再启动，请求在已有进程上排队。请求分给进行中请求最少的进程。
 - 启动方式：`multiprocessing.get_context("spawn")` 启动全新解释器，不继承 Server 进程已导入的模块。
 - 启动参数 `PluginHostSpec` 可以 pickle：数据库配置、插件目录、`PluginManifest`、权限配置、推理配置、所有已加载插件的
   family 和 Source binding、专属存储的根目录。
@@ -327,7 +333,8 @@ Server 进程只负责认证调用者和转发请求，鉴权、版本预检和�
      `HostFailed(permanent=True)`，插件为 `failed`，不再重启；
   7. 发送 `HostReady(implemented=...)`，带上已实现的用户修改方法。
 - 宿主进程是单个 asyncio 事件循环，可以并发处理多个请求；Server 侧以信号量限制每个宿主进程的并发请求数为 8，超出的请求
-  排队，排队时间计入请求时限。
+  排队，排队时间计入请求时限。宿主进程每秒发送一次 `HostHeartbeat`，由事件循环中的任务发出，事件循环被阻塞时心跳随之
+  中断。
 
 ### 7.2 通信
 
@@ -360,18 +367,19 @@ class HostResponse:
     error_type: str | None = None
 ```
 
-另有 `HostReady`、`HostFailed`、`HostShutdown` 三种控制消息。Server 端的 `PluginHost` 在后台任务中读取 `Pipe`，按 `id`
+另有 `HostReady`、`HostFailed`、`HostShutdown`、`HostHeartbeat` 和 `HostCancel(id)` 控制消息。Server 端的 `PluginHost` 在后台任务中读取 `Pipe`，按 `id`
 把响应交给等待的请求。
 
 ### 7.3 超时、故障与重启
 
 | 情况 | 处理 |
 | --- | --- |
-| 单个请求超过时限 | 终止整个宿主进程（`terminate`，5 秒后 `kill`），进行中的全部请求返回 503 |
-| 进程退出或 `Pipe` 关闭 | 同上 |
+| 单个请求超过时限 | Server 发送 `HostCancel(id)`，宿主进程取消该请求的任务；写事务随之回滚，该请求返回 504，其他请求不受影响 |
+| 心跳中断超过 5 秒 | 视为失去响应：终止该宿主进程（`terminate`，5 秒后 `kill`）；已超时的请求返回 504，其他进行中的请求返回 503 |
+| 进程退出或 `Pipe` 关闭 | 进行中的请求返回 503 |
 | 就绪等待超过请求时限 | 该请求返回 503 |
 | 重启 | 退避后在后台重新启动；退避从 1 秒开始，每次翻倍，上限 60 秒；连续运行 5 分钟后清零 |
-| 退避期间 | 该插件的同步调用返回 503；后台调用不受影响 |
+| 退避期间 | 本插件没有其他可用进程时，同步调用返回 503；后台调用不受影响 |
 | 永久失败（`HostFailed(permanent=True)`） | 不重启，插件为 `failed` |
 | Server 停止 | 发送 `HostShutdown`，等待至多 10 秒，然后终止 |
 
@@ -437,6 +445,8 @@ Artifact 不存在时 404。
 - 宿主进程检查调用者的 `scope.read`，然后逐条核对插件返回的命中：family 必须是本插件的，否则为 `contract_violation`；
   只保留 revision 等于当前 revision 且状态为 `active` 的命中，保持插件给出的顺序。
 - Server 按调用者的读取权限组装响应，是否带分数由 `include_scores` 决定。
+- Prepared Context 中插件不可用（宿主进程不可用、超时或检索失败）时，省略该 section，在回执中记录省略的原因，其他
+  section 照常返回。权限过滤后的命中可能少于 `limit`，core 不补取。
 - `POST /v1/context/prepare` 的章节可以列出实现了检索的插件 family：core 以请求的查询和章节的 `limit` 调用
   `search_artifacts`，章节的 `search` 中的其他通用检索字段（如 `mode`、过滤条件）原样透传，同时传入 `max_bytes`。既不是
   内置 family、也不是实现了检索的插件 family 时返回 422。
@@ -464,7 +474,8 @@ Artifact 不存在时 404。
 | `model_unavailable` | 503 | `model_unavailable` |
 | `api_error` | 插件给出的 4xx | 插件给出的错误码 |
 | `error` | 500，只记录异常类型 | `plugin_error` |
-| 超时、宿主进程不可用、退避中 | 503 | `plugin_unavailable` |
+| 请求超过时限 | 504 | `plugin_timeout` |
+| 宿主进程不可用、退避中、因失去响应被终止时的其他请求 | 503 | `plugin_unavailable` |
 
 ---
 
@@ -552,6 +563,10 @@ Artifact 不存在时 404。
 | 后台生成时限 | 300 秒 | 声明 `timeout_seconds` |
 | 用户修改、展示、检索时限 | 30 秒 | 声明 `change_timeout_seconds` |
 | 宿主进程并发请求数 | 8 | 固定 |
+| 每个插件的宿主进程上限 | 1 | 声明 `host_processes`；`POWERCONTEXT_SERVER_PLUGIN_HOST_PROCESSES` |
+| 宿主进程总上限 | 待定 | `POWERCONTEXT_SERVER_PLUGIN_HOST_PROCESSES_TOTAL` |
+| 多出的宿主进程空闲停止 | 5 分钟 | 固定 |
+| 心跳间隔 / 失去响应判定 | 1 秒 / 5 秒 | 固定 |
 | 宿主进程就绪等待 | 60 秒 | 固定 |
 | 宿主进程重启退避 | 1 秒起，翻倍，上限 60 秒；运行 5 分钟后清零 | 固定 |
 | 宿主进程停止等待 | 10 秒 | 固定 |
@@ -577,7 +592,7 @@ Artifact 不存在时 404。
 | 事项 | 说明 |
 | --- | --- |
 | OceanBase / seekdb 上的专属存储 | 按插件建库需要建库权限；没有权限时是否退回到 core 库中按插件名前缀建表 |
-| 宿主进程的默认参数 | 并发上限、退避参数需要用真实插件压测后确认 |
+| 宿主进程的默认参数 | 并发上限、心跳时限、总上限、退避参数需要用真实插件压测后确认 |
 | 检查的并发 | 当前按目录顺序逐个检查，每个约 0.6 秒加插件自身导入时间；插件较多时是否并发检查 |
 
 ---
@@ -596,7 +611,7 @@ RFC 只规定契约。下表列出本文为实现契约所做、RFC 没有规定
 | D6 | 事务外读取记录同一 Artifact 最早读到的 revision，读取历史 revision 不记录（§6.3） | 最早一次读取是插件做决定的起点 |
 | D7 | 已登记的 Source 定义清单与插件给出的完全相同时视为同一定义，内容不同才算冲突（§4.4） | 沿用现有清单登记逻辑；同一插件在多个 Server 实例上加载时依赖这一行为 |
 | D8 | 专属存储的 engine 在 Worker 中每次调用创建，在宿主进程中复用（§9.1） | 与 `setup` 返回对象的生命周期一致 |
-| D9 | 单个请求超时时终止整个宿主进程（§7.3） | asyncio 无法可靠中断一个阻塞的请求 |
-| D10 | 每个加载成功的插件都在后台预先启动宿主进程（§7.1） | 宿主进程启动需要数秒，不应由第一个请求承担；每个插件都有必需的 `render_artifact`，都需要宿主进程 |
+| D9 | 请求超时时先取消该请求，只在心跳中断（事件循环被阻塞）时终止宿主进程；超时的请求返回 504，被连带终止的请求返回 503（§7.3） | 插件等待 I/O 时取消可以生效，不必牺牲同一进程中的其他请求；只有阻塞事件循环时取消无法生效，此时进程中的其他请求本来也已无法完成 |
+| D10 | 每个加载成功的插件都在后台预先启动一个宿主进程并一直保留，负载高时按需增加、空闲后减少，设总上限（§7.1） | 宿主进程启动需要数秒，不应由第一个请求承担；每个插件都有必需的 `render_artifact`，都需要宿主进程。每个插件一组进程而不共用，使阻塞或崩溃不波及其他插件，也为以后按插件隔离依赖留出可能；总上限控制内存 |
 | D11 | 插件写入的 revision 在 `metadata` 中记录插件名和代码指纹（§10） | 排查问题和以后的升级可以知道每个 revision 由哪个版本写入；不进入 Artifact 内容，不影响身份和去重 |
 | D12 | 检索结果只保留当前、`active` 的 revision，按插件给出的顺序（§8.5） | 插件索引可能落后于 core 数据；以 core 的当前状态为准，不让过期或已遗忘的内容出现在结果中 |

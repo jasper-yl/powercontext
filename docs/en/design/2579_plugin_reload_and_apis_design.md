@@ -216,6 +216,13 @@ Host process starts (new snapshot)
   §4.5 is ready, so background invocations use the new snapshot only after the switch.
 - A host process restarted after a crash runs `upgrade` again, consistent with "called on every load"; plugins must make
   it repeatable anyway.
+- `background` instances run no host process: when loading a new version, they spawn a child process that runs only
+  `upgrade` (also as the plugin itself, within `upgrade_timeout_seconds`), and switch the binding's launcher to the new
+  snapshot only after it succeeds; a failure counts as a failed check and dispatch continues from the old snapshot. Every
+  instance runs its own `upgrade`, so new-version `generate` runs only after this instance's `upgrade` completes.
+- `upgrade` makes only quick, repeatable changes; format changes over large data are migrated lazily on read by the
+  plugin, or by a migration script the plugin ships and the deployer runs before upgrading, with no extra core mechanism.
+  The writer in `upgrade` follows the Worker write transaction rules and opens at most one write transaction block.
 
 ---
 
@@ -265,16 +272,17 @@ single request's peak memory is about twice the limit.
 | `ctx.require` or write authorization fails | 403 |
 | `request_model` validation fails or `InvalidContent` | 422 |
 | Any other exception | 500; only the exception type is logged |
-| `timeout_seconds` exceeded, host process unavailable or in backoff | 503; a timeout replaces the host process |
+| `timeout_seconds` exceeded | 504; only that request is cancelled (see RFC #2549 design §7.3, not implemented; currently 503 with the host process replaced) |
+| Host process unavailable, in backoff, or other requests of a process terminated for loss of response | 503 |
 
 Error responses use the Server's standard error format.
 
 ### 5.4 OpenAPI (not implemented)
 
 `GET /v1/plugins/{name}/openapi.json` is generated from the route table: one operation per route with `operationId`
-`<name>_<handler>`; the JSON Schemas of `request_model` and `response_model` come from the declaration the check child
-process exports; `binary` bodies are `application/octet-stream`; every operation lists 401, 403, 404, 413, 422, 500, and
-503 error responses; the extension `x-powercontext-access` records `access` and `scope_param`.
+`<name>__<handler>`; the JSON Schemas of `request_model` and `response_model` come from the declaration the check child
+process exports; `binary` bodies are `application/octet-stream`; every operation lists 401, 403, 404, 413, 422, 500, 503,
+and 504 error responses; the extension `x-powercontext-access` records `access` and `scope_param`.
 
 ### 5.5 MCP tools (not implemented)
 
@@ -290,7 +298,9 @@ process exports; `binary` bodies are `application/octet-stream`; every operation
   the current set. FastMCP can send the tool-list-changed notification only inside a session's request context, while
   hot reload happens outside requests; the implementation sends the notification on the session's next request, and
   otherwise clients see the change the next time they list tools.
-- A tool name that collides with a built-in tool or another plugin's tool fails the plugin's check.
+- Tool names are `<plugin name>__<handler>` with the plugin name unchanged. Plugin names contain no underscores, so
+  everything before the first double underscore is the plugin name and tools of different plugins cannot collide; a name
+  over 64 characters, or one colliding with a built-in tool, fails the plugin's check.
 
 ---
 
@@ -466,10 +476,10 @@ prescribe, to confirm one by one in review. The host process model and communica
 | E3 | Binary request and response bodies of plugin APIs pass as bytes over the `Pipe`, under one limit (§5.2) | Follows RFC #2549 design D1; no temporary files to clean up. The cost is a peak memory of about twice the limit per request | Adopted |
 | E4 | Plugin API authorization and every capability on `ctx` are implemented locally in the host process; the Server only finds the route, authenticates, and limits body size (§5.1, §6) | Follows RFC #2549 design D2; no callback channel | Adopted |
 | E5 | Route matching tries paths without parameters first, then declaration order (§5.1) | Consistent with common web frameworks; parameterized paths cannot swallow fixed ones | Adopted |
-| E6 | The OpenAPI `operationId` and the MCP tool name are both `<plugin name>_<handler>` (§5.4, §5.5) | Stable, predictable, and easy to cross-reference | To implement |
+| E6 | The OpenAPI `operationId` and the MCP tool name are both `<plugin name>__<handler>` (§5.4, §5.5) | Stable, predictable, and easy to cross-reference; plugin names contain no underscores, so the double-underscore separator cannot collide | To implement |
 | E7 | MCP tools reuse the existing internal HTTP bridge, with authorization done by the HTTP route itself (§5.5) | Consistent with built-in tools, with no second authorization path | To implement |
 | E8 | After a plugin page navigates or reloads, forwarding stops and a notice asks the user to reopen it (§7.3) | After navigation the plugin page cannot be told apart from an external page | Adopted |
 | E9 | Static files are served with `no-cache` (§7.2) | Browsers fetch new files right after a plugin update; once hot reload exists, an ETag prefixed with the version digest can be added | Adopted |
-| E10 | `upgrade` runs in the new host process before `setup`, not in a separate child process (§4.7) | The host process has to start before the new version is used anyway, so it reuses that runtime and its resources; a failed run equals a failed host start and follows the existing keep-the-old-version path | To confirm |
+| E10 | Instances that receive requests run `upgrade` in the new host process before `setup`; `background` instances use a short-lived child process that runs only `upgrade` (§4.7) | The host process has to start before the new version is used anyway, so it reuses that runtime and its resources; `background` instances have no host process yet must keep new `generate` on upgraded data. A failure follows the keep-the-old-version path | To confirm |
 | E11 | During `upgrade`, `reads` and `writer` act as the plugin itself and caller-related capabilities are unavailable (§4.7) | An upgrade has no request caller, consistent with the Worker permission model | To confirm |
 | E12 | A host process restarted after a crash runs `upgrade` again (§4.7) | Consistent with "called on every load and must be repeatable", with no need to record whether this process already upgraded | To confirm |
