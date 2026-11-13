@@ -2845,3 +2845,34 @@ cargo test --locked --manifest-path desktop/src-tauri/Cargo.toml \
   --test session bundled_product_qualification_covers_every_desktop_operation
 make contract-test
 ```
+
+
+## Server e0501451 plugin interfaces protocol qualification
+
+`sqlite-plugin-interfaces-e0501451-v1` qualifies all thirteen Desktop protocol operations against
+Server source `e05014518474dcb0d4347f5925a9049713ec9c4b`, which adds directory plugins and removes the
+managed Artifact plugin framework.
+
+- Normalized OpenAPI SHA-256: `6dc5209c2067cb104797f073386fa50dcad1cfbbf90b4f08b86de56ce4febbd9`.
+- Wheel: `powercontext-1.5.2.dev51+ge05014518-py3-none-any.whl`.
+- Wheel SHA-256: `c8e9b9b7ab69424c83748377fbab9c75099867cd517e646fb71258e41d4ebcaf`.
+- Native debug probe SHA-256 (built without debug info): `064e3c798ecf81df7acf17acd80a4bcf1ffa345cbe71e5a1ad6acc651d3ab564`.
+
+On 2026-11-12, Linux 7.0 x86_64 (Ubuntu 24.04, glibc 2.39) and Python 3.11.18 passed anonymous loopback,
+static Bearer, HTTPS with explicit CA/base path, and enforced Provider modes of the unchanged
+`desktop/tests/real_server.py` through the ordinary product ConnectionManager. The probe was built with
+the product Cargo lock without `ci-fixtures` and selected this bundled qualification; the client and
+qualified contract digests are identical. `bundled_product_qualification_covers_every_desktop_operation`
+passed against the same records. The wheel and report are retained under ignored
+`desktop/.artifacts/plugin-interfaces/` and `desktop/.artifacts/real-server.json`.
+This qualifies the observed local SQLite protocol; it does not establish installed WebView, native
+credential persistence, other operating systems, native database upgrades or release acceptance.
+
+Reproduce against the recorded artifact:
+
+```sh
+cargo build --locked --manifest-path desktop/src-tauri/Cargo.toml --example server_probe
+uv run --no-sync python desktop/tests/real_server.py \
+  --product-qualification sqlite-plugin-interfaces-e0501451-v1 \
+  --wheel desktop/.artifacts/plugin-interfaces/powercontext-1.5.2.dev51+ge05014518-py3-none-any.whl
+```
