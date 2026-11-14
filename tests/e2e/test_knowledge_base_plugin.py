@@ -267,6 +267,16 @@ def test_knowledge_bases_hide_scopes_and_process_uploads_with_the_chosen_parser(
             await ok(await client.delete(f"{documents_path}/{deploy}"), 204)
             assert set(await documents(client, kb)) == {"keys.txt", "oncall.md", "runbook.pdf"}
             assert all(name != "deploy.md" for name, _ in await search(client, "north", [kb]))
+            # Uploading a file under the deleted name brings the document back with the new content.
+            await ok(await client.post(documents_path, params={"name": "deploy.md"}, content=b"Deploy from the west."))
+            restored = await wait_for(
+                lambda: documents(client, kb),
+                lambda value: value.get("deploy.md", {}).get("status") == "ready",
+                log=log,
+            )
+            assert restored["deploy.md"]["id"] == deploy
+            assert [name for name, _ in await search(client, "west", [kb], mode="keyword")] == ["deploy.md"]
+            await ok(await client.delete(f"{documents_path}/{deploy}"), 204)
 
             # Search spans knowledge bases; unknown ones are indistinguishable from hidden ones.
             other = (await ok(await client.post(f"{API}/knowledge-bases", json={"name": "Security"})))["id"]

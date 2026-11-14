@@ -979,6 +979,10 @@ class KnowledgeBasePlugin:
         async with writer.transaction() as tx:
             for identity, item, ref in planned:
                 if isinstance(item, DocumentContent):
+                    current = await tx.get(identity)
+                    if current is not None and current.lifecycle_state != "active":
+                        # A file uploaded again under a deleted document's name brings that document back.
+                        await tx.set_lifecycle(identity, "active")
                     await tx.put(identity, content=item.model_dump(mode="json"), source_refs=[ref])
                     continue
                 current = await tx.get(identity)
