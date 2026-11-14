@@ -24,7 +24,7 @@ limitations under the License.
   <script defer src="app.js"></script>
 </head>
 <body>
-  <div class="app" id="app">
+  <div class="app loading" id="app">
     <aside class="sidebar">
       <div class="sidebar-head">
         <h1 data-i18n="knowledge_bases"></h1>
@@ -39,11 +39,13 @@ limitations under the License.
         </div>
       </form>
       <ul class="kb-list" id="kb-list" aria-live="polite"></ul>
+      <p class="muted empty loading-note" role="status" data-i18n="loading"></p>
       <p class="muted empty" id="kb-empty" hidden data-i18n="no_knowledge_bases"></p>
       <footer class="models" id="models"></footer>
     </aside>
 
     <main class="main">
+      <p class="muted loading-note" data-i18n="loading"></p>
       <section class="placeholder" id="placeholder">
         <h2 data-i18n="welcome_title"></h2>
         <p class="muted" data-i18n="welcome_text"></p>

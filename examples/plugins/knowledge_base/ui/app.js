@@ -23,7 +23,7 @@ limitations under the License.
     zh: {
       knowledge_bases: "知识库", new: "新建", name: "名称", description: "描述", cancel: "取消", create: "创建",
       save: "保存", edit: "编辑", delete: "删除", confirm: "确认", confirm_delete_kb: "确定删除这个知识库？",
-      confirm_delete_document: "确定删除？", no_knowledge_bases: "还没有知识库。",
+      confirm_delete_document: "确定删除？", no_knowledge_bases: "还没有知识库。", loading: "正在加载…",
       welcome_title: "选择或新建一个知识库", welcome_text: "每个知识库独立保存文档、切块和检索索引。批量上传文档后，统一选择解析方式再处理。",
       documents: "文档", search_and_ask: "检索与问答", upload_title: "拖拽文件到这里，或点击选择文件",
       upload_hint: "支持 {formats}，单个文件不超过 {size}", document: "文档", status: "状态",
@@ -51,7 +51,7 @@ limitations under the License.
       knowledge_bases: "Knowledge bases", new: "New", name: "Name", description: "Description", cancel: "Cancel",
       create: "Create", save: "Save", edit: "Edit", delete: "Delete", confirm: "Confirm",
       confirm_delete_kb: "Delete this knowledge base?", confirm_delete_document: "Delete?",
-      no_knowledge_bases: "No knowledge bases yet.", welcome_title: "Select or create a knowledge base",
+      no_knowledge_bases: "No knowledge bases yet.", loading: "Loading…", welcome_title: "Select or create a knowledge base",
       welcome_text: "Each knowledge base keeps its own documents, chunks, and search index. Upload documents in bulk, then choose how to parse them.",
       documents: "Documents", search_and_ask: "Search & ask", upload_title: "Drop files here, or click to choose",
       upload_hint: "{formats}, up to {size} each", document: "Document", status: "Status",
@@ -557,6 +557,10 @@ limitations under the License.
     }
   });
 
-  await loadInfo();
-  await loadBases();
+  try {
+    await loadInfo();
+    await loadBases();
+  } finally {
+    $("#app").classList.remove("loading");
+  }
 })();

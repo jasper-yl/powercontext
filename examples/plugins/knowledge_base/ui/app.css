@@ -57,6 +57,10 @@ h2 { font-size: 18px; }
 p { margin: 0; }
 .muted { color: var(--muted); }
 .empty { padding: 16px 4px; }
+/* Until the first knowledge base list arrives, say so instead of showing an empty or welcome state. */
+.loading-note { display: none; }
+.app.loading .loading-note { display: block; }
+.app.loading #kb-empty, .app.loading #placeholder { display: none; }
 
 .app { display: grid; grid-template-columns: 280px 1fr; min-height: 100vh; }
 
