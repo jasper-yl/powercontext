@@ -2876,3 +2876,34 @@ uv run --no-sync python desktop/tests/real_server.py \
   --product-qualification sqlite-plugin-interfaces-e0501451-v1 \
   --wheel desktop/.artifacts/plugin-interfaces/powercontext-1.5.2.dev51+ge05014518-py3-none-any.whl
 ```
+
+
+## Server 15c08206 plugin interfaces review protocol qualification
+
+`sqlite-plugin-interfaces-15c08206-v1` qualifies all thirteen Desktop protocol operations against
+Server source `15c0820684e03560e310ef7c1190f2d7abee0436`, which describes built-in-or-plugin Artifact
+create and replace bodies with `anyOf`.
+
+- Normalized OpenAPI SHA-256: `90eaefdf7d34bdd161b9d0b0882690a73229d5870a56907c403bbafbdd27ca95`.
+- Wheel: `powercontext-1.5.2.dev63+g15c082068-py3-none-any.whl`.
+- Wheel SHA-256: `226f9b51082582cce0b7096ab12177057a570dcb21210d0dd8ea6a358ad2894a`.
+- Native debug probe SHA-256 (built without debug info): `d8da3e70c47612d0ee0a6d73dad740ee9c322f58550a58d865e42a8986d80d36`.
+
+On 2026-11-14, Linux 7.0 x86_64 (Ubuntu 24.04, glibc 2.39) and Python 3.12.3 passed anonymous loopback,
+static Bearer, HTTPS with explicit CA/base path, and enforced Provider modes of the unchanged
+`desktop/tests/real_server.py` through the ordinary product ConnectionManager. The probe was built with
+the product Cargo lock without `ci-fixtures` and selected this bundled qualification; the client and
+qualified contract digests are identical. `bundled_product_qualification_covers_every_desktop_operation`
+passed against the same records. The wheel and report are retained under ignored
+`desktop/.artifacts/plugin-interfaces/` and `desktop/.artifacts/real-server.json`.
+This qualifies the observed local SQLite protocol; it does not establish installed WebView, native
+credential persistence, other operating systems, native database upgrades or release acceptance.
+
+Reproduce against the recorded artifact:
+
+```sh
+cargo build --locked --manifest-path desktop/src-tauri/Cargo.toml --example server_probe
+uv run --no-sync python desktop/tests/real_server.py \
+  --product-qualification sqlite-plugin-interfaces-15c08206-v1 \
+  --wheel desktop/.artifacts/plugin-interfaces/powercontext-1.5.2.dev63+g15c082068-py3-none-any.whl
+```
