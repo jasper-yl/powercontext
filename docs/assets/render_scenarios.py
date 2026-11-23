@@ -1,11 +1,11 @@
 # /// script
 # requires-python = ">=3.11"
 # ///
-"""Write the README scenario cards as light and dark SVGs for each language.
+"""Write the README use-case cards as light and dark SVGs for each language.
 
 Run: python3 docs/assets/render_scenarios.py
-Outputs scenarios/card-{handoff,shared,personal,learning,skills,trace}-{en,zh,ja}-{light,dark}.svg.
-The sample project matches the Dashboard screenshots (an inventory schema migration).
+Outputs scenarios/card-{handoff,shared,knowledge,users,domain,plugins}-{en,zh,ja}-{light,dark}.svg.
+Each card stays within a documented capability; the linked workflow pages in the READMEs are the source.
 """
 
 from pathlib import Path
@@ -32,34 +32,33 @@ COPY = {
         },
         "shared": {
             "tag": "共享 Scope", "title": "多个 Agent，共用一份记忆",
-            "lead": "在 Codex 里定下的约定，换到 Claude Code、Kimi Code 也知道。",
-            "a": "Codex", "b": "Claude Code", "c": "Kimi Code", "scope": "同一个 Scope",
+            "lead": "在 Codex 里定下的约定，换到 Claude Code、OpenCode 也知道。",
+            "agents": ("Codex", "Claude Code", "OpenCode"), "scope": "同一个 Scope",
             "rows": ("决定", "约束", "进度"),
         },
-        "personal": {
-            "tag": "画像与记忆规则", "title": "记住你的习惯和规矩",
-            "lead": "偏好只说一次；记什么、怎么整理，由你定。",
-            "say": "“设计评审放到语雀。”", "profile": "你的画像",
-            "p1": "文档工具：语雀", "p2": "写作：先结论，后细节",
-            "rule": "记忆规则", "rule1": "只保留长期决策和约束",
+        "knowledge": {
+            "tag": "知识库插件", "title": "公司文档，Agent 查得到",
+            "lead": "导入 Markdown 和图片，按版本维护，检索结果带出处。",
+            "docs": ("部署手册.md", "接口规范.md", "架构图.png"), "kb": "知识库",
+            "q": "回滚步骤是什么？", "a": "→ 部署手册.md · 第 3 节",
         },
-        "learning": {
-            "tag": "主题记忆与 Dream", "title": "越用越懂你的项目",
-            "lead": "讨论沉淀成主题，经验经你审核后更新。",
-            "steps": ("日常讨论", "主题摘要", "Dream 提出修订", "你来审核"),
-            "note": "Dream 根据过往依据提出修订，批准后才生效",
+        "users": {
+            "tag": "用户画像 · SDK", "title": "你的应用，记住每一位用户",
+            "lead": "按业务用户 ID 积累画像，在 LangChain、LangGraph 等应用中召回。",
+            "people": ("用户 U1", "用户 U2", "用户 U3"), "profile": "U1 的画像",
+            "p1": "偏好简洁的中文回答", "p2": "常用移动端", "others": ("U2 的画像", "U3 的画像"),
         },
-        "skills": {
-            "tag": "经验与技能", "title": "做过一次，下次就会",
-            "lead": "验证过的做法沉淀为经验和技能，审核后导出给 Agent。",
-            "case": "一次成功的排查", "c1": "情境：测试偶发失败", "c2": "做法：先固定随机种子", "c3": "结果：稳定通过",
-            "skill": "技能：排查偶发失败", "k1": "✓ 已审核", "k2": "→ 导出到 Codex",
+        "domain": {
+            "tag": "行业 Agent", "title": "行业 Agent，越诊断越有经验",
+            "lead": "历史诊断沉淀为可复用的经验，任务中断后也能接着做。",
+            "steps": ("告警与遥测", "诊断 Agent", "结论与处置"),
+            "memory_tag": "经验", "memory": "相似故障的处理经验", "resume_tag": "任务状态", "resume": "中断后从上一步继续",
         },
-        "trace": {
-            "tag": "来源与版本", "title": "每条记忆，都有出处",
-            "lead": "回答带着来源，能追到当时的记录和确切版本。",
-            "who": "Agent 的回答", "answer": "迁移期间保留旧的 SKU 映射。",
-            "src": "来源 [1]", "r1": "会话记录 · 周一", "r2": "第 40–55 行", "r3": "记忆版本 @1",
+        "plugins": {
+            "tag": "Source 与 Artifact 插件", "title": "工单和事故，变成能检索的知识",
+            "lead": "用插件接入业务数据，按你定义的格式生成制品。",
+            "src": "工单 OPS-7", "f1": "支付回调超时", "f2": "状态：已解决",
+            "art": "工单摘要（自定义制品）", "a1": "原因：证书过期", "a2": "处理：轮换证书", "a3": "来源：OPS-7",
         },
     },
     "en": {
@@ -73,34 +72,33 @@ COPY = {
         "shared": {
             "tag": "Shared Scope", "title": "One memory for every agent",
             "lead": "A rule agreed in Codex carries over to Claude Code and OpenCode.",
-            "a": "Codex", "b": "Claude Code", "c": "OpenCode", "scope": "One Scope",
+            "agents": ("Codex", "Claude Code", "OpenCode"), "scope": "One Scope",
             "rows": ("Decisions", "Constraints", "Progress"),
         },
-        "personal": {
-            "tag": "Profile & memory rules", "title": "Your habits, your rules",
-            "lead": "Say a preference once. You decide what is kept and how.",
-            "say": "“Use Notion for reviews.”", "profile": "Your profile",
-            "p1": "Docs: Notion", "p2": "Writing: conclusion first",
-            "rule": "Memory rule", "rule1": "Long-term decisions only",
+        "knowledge": {
+            "tag": "Knowledge-base plugin", "title": "Company docs your agent can search",
+            "lead": "Import Markdown and images, keep revisions, and get cited results.",
+            "docs": ("deploy-guide.md", "api-spec.md", "architecture.png"), "kb": "Knowledge base",
+            "q": "How do I roll back?", "a": "→ deploy-guide.md · §3",
         },
-        "learning": {
-            "tag": "Topic Memory & Dream", "title": "Knows your project better over time",
-            "lead": "Discussions become topics; lessons update after your review.",
-            "steps": ("Discuss", "Summarize", "Dream revises", "You approve"),
-            "note": "Dream proposes revisions from past evidence; they apply once approved",
+        "users": {
+            "tag": "Profiles · SDK", "title": "Your app remembers every user",
+            "lead": "Profiles build up per business user ID, recalled in LangChain or LangGraph.",
+            "people": ("User U1", "User U2", "User U3"), "profile": "U1's profile",
+            "p1": "Prefers concise answers", "p2": "Mostly on mobile", "others": ("U2's profile", "U3's profile"),
         },
-        "skills": {
-            "tag": "Experience & Skills", "title": "Solved once, reused next time",
-            "lead": "Proven approaches become experiences and skills, exported after review.",
-            "case": "A fix that worked", "c1": "Situation: flaky test", "c2": "Action: pin the seed",
-            "c3": "Outcome: passes reliably",
-            "skill": "Skill: fix flaky tests", "k1": "✓ Approved", "k2": "→ Exported to Codex",
+        "domain": {
+            "tag": "Domain agents", "title": "Domain agents learn from every case",
+            "lead": "Past diagnoses become reusable experience; interrupted tasks resume.",
+            "steps": ("Alarms & data", "Diagnosis agent", "Finding & fix"),
+            "memory_tag": "Experience", "memory": "How similar faults were fixed", "resume_tag": "Task state", "resume": "Resume from the last step",
         },
-        "trace": {
-            "tag": "Sources & revisions", "title": "Every memory has a source",
-            "lead": "Answers cite where they came from, down to the exact revision.",
-            "who": "Agent answer", "answer": "Keep the old SKU mapping.",
-            "src": "Source [1]", "r1": "Session log · Monday", "r2": "Lines 40–55", "r3": "Memory revision @1",
+        "plugins": {
+            "tag": "Source & Artifact plugins", "title": "Tickets become searchable knowledge",
+            "lead": "Bring in business data with plugins and generate artifacts in your format.",
+            "src": "Ticket OPS-7", "f1": "Payment callback timeout", "f2": "Status: resolved",
+            "art": "Ticket summary (custom)", "a1": "Cause: expired certificate", "a2": "Fix: rotate certificate",
+            "a3": "Source: OPS-7",
         },
     },
     "ja": {
@@ -114,34 +112,33 @@ COPY = {
         "shared": {
             "tag": "共有 Scope", "title": "複数の Agent で、ひとつの記憶",
             "lead": "Codex で決めた約束を、Claude Code や OpenCode でも共有。",
-            "a": "Codex", "b": "Claude Code", "c": "OpenCode", "scope": "同じ Scope",
+            "agents": ("Codex", "Claude Code", "OpenCode"), "scope": "同じ Scope",
             "rows": ("判断", "制約", "進捗"),
         },
-        "personal": {
-            "tag": "プロファイルと記憶ルール", "title": "あなたの習慣とルールを覚える",
-            "lead": "好みは一度伝えるだけ。何をどう残すかはあなたが決める。",
-            "say": "「レビューは Notion で。」", "profile": "あなたのプロファイル",
-            "p1": "ドキュメント：Notion", "p2": "文章：結論が先",
-            "rule": "記憶ルール", "rule1": "長期の判断と制約だけ残す",
+        "knowledge": {
+            "tag": "ナレッジベースプラグイン", "title": "社内ドキュメントを、Agent が検索",
+            "lead": "Markdown と画像を取り込み、版を管理し、出典つきで検索。",
+            "docs": ("デプロイ手順.md", "API 仕様.md", "構成図.png"), "kb": "ナレッジベース",
+            "q": "ロールバック手順は？", "a": "→ デプロイ手順.md · 第 3 節",
         },
-        "learning": {
-            "tag": "Topic Memory と Dream", "title": "使うほど、プロジェクトに詳しく",
-            "lead": "議論はトピックにまとまり、経験はレビュー後に更新。",
-            "steps": ("日々の議論", "トピック要約", "Dream が改訂案", "あなたが承認"),
-            "note": "Dream が過去の根拠から改訂を提案し、承認後に反映",
+        "users": {
+            "tag": "プロファイル · SDK", "title": "アプリが、ユーザーを一人ずつ覚える",
+            "lead": "業務ユーザー ID ごとにプロファイルを蓄積し、LangChain などで想起。",
+            "people": ("ユーザー U1", "ユーザー U2", "ユーザー U3"), "profile": "U1 のプロファイル",
+            "p1": "簡潔な回答を好む", "p2": "主にモバイルを利用", "others": ("U2 のプロファイル", "U3 のプロファイル"),
         },
-        "skills": {
-            "tag": "経験とスキル", "title": "一度解けば、次から使える",
-            "lead": "検証済みのやり方を経験とスキルに。レビュー後に Agent へ。",
-            "case": "うまくいった調査", "c1": "状況：テストがときどき失敗", "c2": "対応：乱数シードを固定",
-            "c3": "結果：安定して成功",
-            "skill": "スキル：不安定テスト対応", "k1": "✓ 承認済み", "k2": "→ Codex へエクスポート",
+        "domain": {
+            "tag": "業界向け Agent", "title": "業界 Agent が、診断ごとに賢く",
+            "lead": "過去の診断を再利用できる経験に。中断したタスクも再開。",
+            "steps": ("アラームと計測", "診断 Agent", "結論と対処"),
+            "memory_tag": "経験", "memory": "類似障害の対処経験", "resume_tag": "タスクの状態", "resume": "中断後は直前の段階から再開",
         },
-        "trace": {
-            "tag": "出典とリビジョン", "title": "すべての記憶に、出典がある",
-            "lead": "回答は出典つき。当時の記録と正確なリビジョンまでたどれる。",
-            "who": "Agent の回答", "answer": "移行中は旧 SKU 対応を残す。",
-            "src": "出典 [1]", "r1": "セッション記録 · 月曜", "r2": "40–55 行目", "r3": "記憶リビジョン @1",
+        "plugins": {
+            "tag": "Source と Artifact のプラグイン", "title": "チケットを、検索できる知識に",
+            "lead": "プラグインで業務データを取り込み、独自の形式で Artifact を生成。",
+            "src": "チケット OPS-7", "f1": "決済コールバックの遅延", "f2": "状態：解決済み",
+            "art": "チケット要約（独自形式）", "a1": "原因：証明書の期限切れ", "a2": "対処：証明書を更新",
+            "a3": "出典：OPS-7",
         },
     },
 }
@@ -162,6 +159,21 @@ def arrow(x1, y1, x2, y2, t, color="muted"):
             f'marker-end="url(#head-{color})"/>')
 
 
+def chips(x, y, items, t, w=238, h=34, gap=6, size=14.5):
+    return "".join(rect(x, y + i * (h + gap), w, h, t, fill="card", stroke="card", r=8)
+                   + text(x + 14, y + i * (h + gap) + h / 2 + 5, item, t, size, 400, "ink2")
+                   for i, item in enumerate(items))
+
+
+def fan_in(names, t, target_x=300, target_y=238):
+    parts = []
+    for i, name in enumerate(names):
+        y = 152 + i * 60
+        parts += [rect(32, y, 170, 44, t), text(117, y + 28, name, t, 15, 600, "ink", "middle"),
+                  arrow(206, y + 22, target_x, target_y, t)]
+    return parts
+
+
 def handoff(c, t):
     return "".join([
         rect(32, 150, 262, 176, t),
@@ -179,11 +191,7 @@ def handoff(c, t):
 
 
 def shared(c, t):
-    parts = []
-    for i, name in enumerate((c["a"], c["b"], c["c"])):
-        y = 152 + i * 60
-        parts += [rect(32, y, 170, 44, t), text(117, y + 28, name, t, 15, 600, "ink", "middle"),
-                  arrow(206, y + 22, 300, 238, t)]
+    parts = fan_in(c["agents"], t)
     parts += [rect(310, 152, 298, 164, t, fill="soft", stroke="accent"),
               text(330, 186, c["scope"], t, 17, 700, "accent")]
     for i, row in enumerate(c["rows"]):
@@ -191,77 +199,70 @@ def shared(c, t):
     return "".join(parts)
 
 
-def personal(c, t):
-    return "".join([
-        rect(32, 156, 250, 54, t, fill="soft", stroke="soft", r=12),
-        text(48, 189, c["say"], t, 15, 600, "ink"),
-        rect(32, 252, 250, 74, t, dash=True),
-        text(48, 278, c["rule"], t, 13, 700, "muted"),
-        text(48, 306, c["rule1"], t, 15, 600, "ink"),
-        arrow(288, 183, 326, 214, t),
-        arrow(288, 289, 326, 268, t),
-        rect(334, 156, 274, 170, t, stroke="accent"),
-        text(352, 188, c["profile"], t, 16, 700, "accent"),
-        rect(352, 206, 238, 40, t, fill="card", stroke="card", r=8),
-        text(366, 232, c["p1"], t, 15, 400, "ink2"),
-        rect(352, 258, 238, 40, t, fill="card", stroke="card", r=8),
-        text(366, 284, c["p2"], t, 15, 400, "ink2"),
-    ])
-
-
-def learning(c, t):
-    parts = []
-    w, gap, x0 = 128, 22, 32
-    for i, step in enumerate(c["steps"]):
-        x = x0 + i * (w + gap)
-        last = i == len(c["steps"]) - 1
-        parts.append(rect(x, 176, w, 64, t, fill="soft" if last else "box", stroke="accent" if last else "line"))
-        parts.append(text(x + w / 2, 213, ("✓ " if last else "") + step, t, 14, 700 if last else 600,
-                          "accent" if last else "ink", "middle"))
-        if not last:
-            parts.append(arrow(x + w + 2, 208, x + w + gap - 2, 208, t))
-    parts.append(text(320, 290, c["note"], t, 13.5, 400, "muted", "middle"))
+def knowledge(c, t):
+    parts = fan_in(c["docs"], t)
+    parts += [rect(310, 152, 298, 164, t, stroke="accent"),
+              text(330, 186, c["kb"], t, 17, 700, "accent"),
+              rect(330, 204, 258, 40, t, fill="soft", stroke="soft", r=8),
+              text(344, 230, c["q"], t, 15, 600, "ink"),
+              text(330, 280, c["a"], t, 15, 600, "ink2")]
     return "".join(parts)
 
 
-def skills(c, t):
-    return "".join([
-        rect(32, 150, 262, 176, t),
-        text(50, 180, c["case"], t, 14, 700, "muted"),
-        text(50, 218, c["c1"], t, 15, 400, "ink2"),
-        text(50, 250, c["c2"], t, 15, 400, "ink2"),
-        text(50, 282, c["c3"], t, 15, 400, "ink2"),
-        arrow(300, 238, 336, 238, t, "accent"),
-        rect(346, 150, 262, 176, t, stroke="accent"),
-        text(364, 184, c["skill"], t, 16, 700, "accent"),
-        rect(364, 204, 226, 40, t, fill="soft", stroke="soft", r=8),
-        text(378, 230, c["k1"], t, 15, 600, "ok"),
-        rect(364, 256, 226, 40, t, fill="card", stroke="card", r=8),
-        text(378, 282, c["k2"], t, 15, 600, "ink"),
-    ])
+def users(c, t):
+    parts = []
+    for i, name in enumerate(c["people"]):
+        y = 152 + i * 60
+        parts += [rect(32, y, 170, 44, t), text(117, y + 28, name, t, 15, 600, "ink", "middle")]
+    parts += [arrow(206, 174, 302, 190, t, "accent"),
+              arrow(206, 234, 302, 275, t), arrow(206, 294, 302, 307, t),
+              rect(310, 152, 298, 100, t, stroke="accent"),
+              text(330, 184, c["profile"], t, 16, 700, "accent"),
+              text(330, 214, "· " + c["p1"], t, 14.5, 400, "ink2"),
+              text(330, 238, "· " + c["p2"], t, 14.5, 400, "ink2"),
+              rect(310, 262, 298, 26, t, dash=True, r=8),
+              text(326, 280, c["others"][0], t, 13, 400, "muted"),
+              rect(310, 294, 298, 26, t, dash=True, r=8),
+              text(326, 312, c["others"][1], t, 13, 400, "muted")]
+    return "".join(parts)
 
 
-def trace(c, t):
+def domain(c, t):
+    w, gap, x0 = 172, 23, 32
+    parts = []
+    for i, step in enumerate(c["steps"]):
+        x = x0 + i * (w + gap)
+        mid = i == 1
+        parts += [rect(x, 152, w, 56, t, fill="soft" if mid else "box", stroke="accent" if mid else "line"),
+                  text(x + w / 2, 186, step, t, 15, 700 if mid else 600, "accent" if mid else "ink", "middle")]
+        if i < len(c["steps"]) - 1:
+            parts.append(arrow(x + w + 2, 180, x + w + gap - 2, 180, t))
+    parts += [f'<path d="M290 212L190 252" stroke="{t["accent"]}" stroke-width="2" fill="none" '
+              f'marker-end="url(#head-accent)" marker-start="url(#head-accent)"/>',
+              f'<path d="M336 212L436 252" stroke="{t["muted"]}" stroke-width="2" fill="none" '
+              f'marker-end="url(#head-muted)" marker-start="url(#head-muted)"/>']
+    for x, label, body, accent in ((32, c["memory_tag"], c["memory"], True), (330, c["resume_tag"], c["resume"], False)):
+        parts += [rect(x, 258, 278, 66, t, fill="soft" if accent else "box", stroke="accent" if accent else "line"),
+                  text(x + 18, 283, label, t, 13, 700, "muted"),
+                  text(x + 18, 309, body, t, 15, 600, "ink")]
+    return "".join(parts)
+
+
+def plugins(c, t):
     return "".join([
-        rect(32, 170, 272, 96, t, fill="soft", stroke="soft", r=12),
-        text(48, 198, c["who"], t, 13, 700, "muted"),
-        text(48, 232, c["answer"], t, 15, 600, "ink"),
-        f'<rect x="262" y="182" width="30" height="22" rx="11" fill="{t["accent"]}"/>',
-        text(277, 198, "1", t, 13, 700, "bg", "middle"),
-        arrow(310, 218, 328, 218, t, "accent"),
+        rect(32, 150, 250, 176, t),
+        text(50, 182, c["src"], t, 15, 700, "muted"),
+        text(50, 222, c["f1"], t, 15, 600, "ink"),
+        text(50, 254, c["f2"], t, 15, 400, "ink2"),
+        arrow(288, 238, 324, 238, t, "accent"),
         rect(334, 150, 274, 176, t, stroke="accent"),
-        text(352, 182, c["src"], t, 16, 700, "accent"),
-        rect(352, 198, 238, 34, t, fill="card", stroke="card", r=8),
-        text(366, 220, c["r1"], t, 14.5, 400, "ink2"),
-        rect(352, 238, 238, 34, t, fill="card", stroke="card", r=8),
-        text(366, 260, c["r2"], t, 14.5, 400, "ink2"),
-        rect(352, 278, 238, 34, t, fill="card", stroke="card", r=8),
-        text(366, 300, c["r3"], t, 14.5, 400, "ink2"),
+        text(352, 182, c["art"], t, 15.5, 700, "accent"),
+        chips(352, 198, (c["a1"], c["a2"], c["a3"]), t),
     ])
 
 
-SCENES = {"handoff": handoff, "shared": shared, "personal": personal, "learning": learning,
-          "skills": skills, "trace": trace}
+SCENES = {"handoff": handoff, "shared": shared, "knowledge": knowledge, "users": users, "domain": domain,
+          "plugins": plugins}
 
 
 def card(scene, lang, theme):
@@ -288,6 +289,8 @@ def card(scene, lang, theme):
 
 def main():
     ASSETS.mkdir(exist_ok=True)
+    for old in ASSETS.glob("card-*.svg"):
+        old.unlink()
     for scene in SCENES:
         for lang in COPY:
             for theme in THEMES:
