@@ -5,11 +5,20 @@
   </picture>
 </p>
 
+<h3 align="center">The open-source context service for AI agents</h3>
 <p align="center">
-  <a href="#quick-start"><b>Get started</b></a> &nbsp; · &nbsp;
-  <a href="#proof-it-works">See the proof</a> &nbsp; · &nbsp;
-  <a href="#put-context-to-work">Use cases</a> &nbsp; · &nbsp;
-  <a href="https://powercontext.oceanbase.io/en/docs/">Documentation</a> &nbsp; · &nbsp;
+  Fewer detours. Fewer tokens.<br />
+  <a href="#memory-and-collaboration">Personal memory</a> · <a href="#memory-and-collaboration">handoffs</a> · <a href="#memory-and-collaboration">Dream</a> · <a href="#memory-and-collaboration">shared memory across agents</a> · <a href="#traceable-and-governed">Scope isolation</a>, all in one service.
+</p>
+
+<p align="center">
+  <a href="#what-is-powercontext">What</a> &nbsp;·&nbsp;
+  <a href="#why-powercontext">Why</a> &nbsp;·&nbsp;
+  <a href="#architecture">Architecture</a> &nbsp;·&nbsp;
+  <a href="#quick-start"><b>Quick start</b></a> &nbsp;·&nbsp;
+  <a href="#ecosystem">Ecosystem</a> &nbsp;·&nbsp;
+  <a href="#news">News</a> &nbsp;·&nbsp;
+  <a href="https://powercontext.oceanbase.io/en/docs/">Docs</a> &nbsp;·&nbsp;
   <a href="https://discord.com/invite/74cF8vbNEs">Discord</a>
 </p>
 <p align="center">
@@ -17,43 +26,45 @@
   <a href="https://pypi.org/project/powercontext/">Python package</a> · <a href="LICENSE">Apache 2.0</a>
 </p>
 
-## Why PowerContext?
+## What is PowerContext
 
-**The right context. Faster progress. Fewer tokens.** PowerContext brings relevant knowledge, user preferences, task progress, and past experience into the current task, helping agents spend less time searching again, asking the same questions, and repeating unsuccessful attempts.
+**PowerContext helps agents and harnesses manage context.** It turns conversations, documents, and work records into knowledge that can be searched, updated, and traced to its sources, and brings it to the agent when needed:
 
-- **Relevant context, with evidence.** Find knowledge and code for the task, preserve sources, and check code freshness before use.
-- **Faster progress, fewer round trips.** Pick up from existing progress, using confirmed approaches and constraints to reduce repeated discovery and trial and error.
-- **Less total effort and token use.** Make each model call more useful, reduce unnecessary reasoning and tool round trips, and spend less time waiting or explaining the background again.
+- **Fewer tokens:** help agents find the right code and read the right lines, with fewer round trips to finish a task. [See the benchmark →](#fewer-tokens)
+- **Multi-agent collaboration:** agents, sessions, and teammates share memory in one Scope and pick up work through handoffs. [Learn more →](#memory-and-collaboration)
+- **Self-improvement:** Dream proposes memory and prompt revisions from past evidence, applied after your review. [Learn more →](#memory-and-collaboration)
+- **Traceable:** every memory traces back to its source evidence and exact revision. [Learn more →](#traceable-and-governed)
+- **Governed:** Scopes isolate data and access, and generated experiences and skills are recalled only after review. [Learn more →](#traceable-and-governed)
 
-## What is PowerContext?
+Run it as a service through HTTP, MCP, Python, or Agent integrations, or embed Core in your own application.
 
-**PowerContext is an open-source context service for AI agents.** It turns conversations, documents, and work records into knowledge that can be searched, updated, and traced to its sources, helping agents understand the person, know the project, and continue from where work left off.
+<!-- Video slot: a 30–60 second real recording of an agent continuing, in a second session, the work of the first. -->
+<table width="100%">
+  <tr>
+    <td width="50%" valign="top"><img src="docs/assets/screenshots/dashboard-memory-en.png" width="100%" alt="Dashboard Memories page listing decisions and constraints, each with its source and revision" /><br /><sub><b>Memories</b> · decisions and constraints, with source and revision</sub></td>
+    <td width="50%" valign="top"><img src="docs/assets/screenshots/dashboard-handoff-en.png" width="100%" alt="Dashboard handoff page with recorded progress, the next action, and what is not covered" /><br /><sub><b>Handoffs</b> · recorded progress, next action, and gaps</sub></td>
+  </tr>
+</table>
 
-[Rich artifacts for different kinds of knowledge →](https://powercontext.oceanbase.io/en/docs/workflows/artifacts/) · [Evolve with Dream →](https://powercontext.oceanbase.io/en/docs/workflows/review-dream-revisions/) · [Extend with flexible plugins →](https://powercontext.oceanbase.io/en/docs/develop/plugins/)
+## Why PowerContext
 
-Run it as a service through HTTP, MCP, Python, or Agent integrations, or embed Core in your own application. [Explore the product and workflows →](https://powercontext.oceanbase.io/en/docs/workflows/memory-and-handoff/)
+### Fewer tokens
 
-## Proof it works
+**Every model call in an agent loop re-sends the accumulated context.** So PowerContext optimizes the round trips and total cost of finishing the whole task: helping the agent find the right code, read the right lines, batch independent work, and run focused tests, with less repeated exploration and fewer unproductive attempts.
 
-**Spend fewer tokens. Lower model costs.** On the same 24 SWE-bench Pro tasks, PowerContext used **32.57% fewer tokens** and delivered **15.42% lower estimated model cost**, including memory generation. Both groups solved the **same 16 tasks**.
-
-**Solving alone uses 40.30% fewer tokens; including memory generation overhead, the reduction is 32.57%.** Saved memories can be reused in later sessions, extending the value of accumulated knowledge. This benchmark measures the current run; future reuse benefits have not been measured here.
-
-**Best task: 63.49% fewer tokens and 51.98% lower estimated model cost.** Both runs passed case 456, with tokens falling from 2.30 million to 0.84 million, including memory generation.
-
-[Explore the 24-task benchmark: results, methodology, and setup →](docs/benchmarks/token-savings/README.md)
-
-### Coding: fewer detours, less wasted work
-
-**Make each reasoning step more useful, with fewer round trips to finish the task.** Relevant code, clear working requirements, and past experience help agents find the next useful step. Our focus is the time and tokens needed for the whole task, reducing repeated exploration, rereading, and unproductive attempts.
+- **Same 24 tasks, memory generation included:** **32.57% fewer tokens** and **15.42% lower estimated model cost**, with both groups solving the same 16 tasks. Solving alone uses 40.30% fewer tokens; the best task uses 63.49% fewer.
+- **Fewer round trips:** in a separate run on the same task IDs (OFF vs. MS), main-model requests fell from 708 to 539, **23.87% fewer**. That run uses a different configuration, so its numbers do not combine with the ones above.
+- **Memory generation reuses the cache:** generating memories costs tokens, and the 32.57% above includes them. In gateway mode, memory extraction can reuse the context prefix of solving requests; 97% of input to memory-generation calls with recorded cache fields hit the cache.
 
 This benchmark runs in **gateway mode**, with code retrieval, working guidance, and project memory enabled together:
 
 <img src="docs/assets/readme-capabilities-en.svg" width="100%" alt="CodeGraph: relevant code with freshness checks. Steering: targeted reads, batched work and focused tests. Memory: saved decisions and bounded recall for later sessions." />
 
-**Extract memory. Reuse the cache.** The 32.57% reduction above includes memory-generation tokens. In gateway mode, you can enable prefix-cached memory extraction to reuse context prefixes from solving requests when eligible, lowering input costs on cache hits. In this benchmark, 97% of input to memory-generation calls with recorded cache fields hit the cache. [Explore the separate memory-extraction cost and quality study →](https://gist.github.com/jasper-yl/d02bfb7d9b45ca175bf74ad09cfa5ba4#file-00-report-en-md)
+[24-task benchmark: results and methodology →](docs/benchmarks/token-savings/README.md) · [Main-model request counts →](docs/benchmarks/token-savings/request-counts.md) · [Memory-extraction cost and quality →](https://gist.github.com/jasper-yl/d02bfb7d9b45ca175bf74ad09cfa5ba4#file-00-report-en-md)
 
-## Put context to work
+### Memory and collaboration
+
+Agents, sessions, and teammates can share memory in the same Scope, and everyone can define their own memory rules.
 
 <!-- Each card is editable HTML; keep text and links aligned across the three READMEs. -->
 <table width="100%">
@@ -105,7 +116,42 @@ This benchmark runs in **gateway mode**, with code retrieval, working guidance, 
   </tr>
 </table>
 
+### Traceable and governed
+
+- **Evidence behind every memory:** each memory traces back to its source evidence and exact revision, and can point to the precise location in the source.
+- **Reviewed changes:** generated experiences and skills are recalled only after review; Dream revisions take effect after your approval; outdated memories can be retired while their history is kept.
+- **Clear boundaries:** Scopes isolate data and access; operational telemetry excludes prompts, content, and model responses.
+
+[Review candidates →](https://powercontext.oceanbase.io/en/docs/workflows/review-candidates/) · [Scopes and access →](https://powercontext.oceanbase.io/en/docs/workflows/scopes-and-access/)
+
+## Architecture
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/readme-architecture-en-dark.svg" />
+  <img src="docs/assets/readme-architecture-en-light.svg" width="100%" alt="PowerContext architecture: agents and apps connect to PowerContext Server through hooks, MCP, SDKs, or an optional gateway. The Server keeps Sources per Scope, processes them into Artifacts in the background, and recalls them into PreparedContext. Storage is SQLite, OceanBase, or seekDB, with generation and embedding models called as needed." />
+</picture>
+
+Agents connect to the Server through hooks, MCP, or SDKs, or send model requests through the gateway, which injects context and provides working guidance. The Server keeps source evidence (Sources) per Scope, processes it in the background into Artifacts such as memories, Topic Memory, profiles, experiences, and skills, and recalls them into context for the next turn. [Architecture and responsibilities →](https://powercontext.oceanbase.io/en/docs/workflows/architecture/)
+
 ## Quick start
+
+### Let your agent install it
+
+Copy this into your agent (Codex shown here):
+
+```text
+Install PowerContext and connect it to Codex for me. PowerContext is an open-source context service for AI agents (https://github.com/oceanbase/powercontext); the command and links below come from its official docs.
+
+1. Run the official installer. It needs network access and writes to my home directory; if your sandbox blocks that, ask me for approval first:
+   curl -fsSL https://powercontext.oceanbase.io/install.sh | bash
+2. Read the Quick Start guide and walk me through configuration, starting the service, creating and binding a Scope, and installing the Codex integration:
+   https://powercontext.oceanbase.io/en/llms.mdx/docs/get-started/quickstart/content.md
+   The configuration wizard is interactive: ask me to run powercontext config init --output .env in my own terminal instead of answering it for me. Ask me before choices such as model credentials.
+3. When you finish, tell me how to trust the PowerContext hooks with /hooks in Codex and how to check that memory works.
+```
+
+<details>
+<summary><b>Install it yourself</b></summary>
 
 You need Python 3.11+, Git, and [uv](https://docs.astral.sh/uv/getting-started/installation/), plus the CLI of any Agent you want to connect. This setup pins version **1.5.2** for macOS and Linux; Windows support is experimental. The [installation script](https://powercontext.oceanbase.io/en/docs/get-started/install-and-run/#install-with-the-recommended-script) can also provision Python and uv.
 
@@ -152,7 +198,9 @@ Verify the workflow you enabled:
 
 <sub>This starts the context service. It does not automatically reproduce the benchmark's Gateway, CodeGraph, or Steering configuration; see the evidence report.</sub>
 
-## Fits your workflow
+</details>
+
+## Ecosystem
 
 <!-- Add integrations using an original logo asset, a product name, and a documentation link. -->
 <table width="100%">
@@ -185,8 +233,22 @@ Codex is officially maintained; other Agent and Python framework integrations ar
 
 **Apps & teams** — [Python / HTTP / MCP](https://powercontext.oceanbase.io/en/docs/develop/interfaces/) · [Memory & Handoff](https://powercontext.oceanbase.io/en/docs/workflows/memory-and-handoff/) · [Deployment & access](https://powercontext.oceanbase.io/en/docs/workflows/scopes-and-access/)
 
----
+## News
 
-[Documentation](https://powercontext.oceanbase.io/en/docs/) · [Contribute](https://github.com/oceanbase/powercontext/blob/master/CONTRIBUTING.md) · [Issues](https://github.com/oceanbase/powercontext/issues) · [Discord](https://discord.com/invite/74cF8vbNEs)
+- **2026-11-16 · [v1.5.2](https://github.com/oceanbase/powercontext/releases/tag/powercontext-v1.5.2)** — Batched writes and query optimizations: maintainer measurements report about 190% higher write throughput and 171% higher query throughput than v1.5.1. The Dashboard now shows processing progress, failure diagnostics, and token usage.
+- **2026-11-09 · [v1.5.1](https://github.com/oceanbase/powercontext/releases/tag/powercontext-v1.5.1)** — Trace memories to precise source locations, plus an optional monitoring stack for metrics, logs, and traces.
+- **2026-11-03 · [v1.5.0](https://github.com/oceanbase/powercontext/releases/tag/powercontext-v1.5.0)** — Source and Artifact plugins for custom ingestion and artifact types, and reversible encoding that removes repeated evidence from model input.
+
+[All releases →](https://github.com/oceanbase/powercontext/releases)
+
+## Learn more
+
+- [Core concepts](https://powercontext.oceanbase.io/en/docs/get-started/core-concepts/) · [Architecture and responsibilities](https://powercontext.oceanbase.io/en/docs/workflows/architecture/) · [Plugins](https://powercontext.oceanbase.io/en/docs/develop/plugins/)
+- [Python / HTTP / MCP interfaces](https://powercontext.oceanbase.io/en/docs/develop/interfaces/) · [Deploy the Server](https://powercontext.oceanbase.io/en/docs/operate/deploy-server/)
+- [Token benchmark report](docs/benchmarks/token-savings/README.md) · [Blog](https://powercontext.oceanbase.io/en/blog/)
+
+## Community
+
+[Discord](https://discord.com/invite/74cF8vbNEs) · [Issues](https://github.com/oceanbase/powercontext/issues) · [Contributing](https://github.com/oceanbase/powercontext/blob/master/CONTRIBUTING.md)
 
 PowerContext is the successor to [PowerMem](https://www.powermem.ai/). Released under [Apache 2.0](LICENSE).

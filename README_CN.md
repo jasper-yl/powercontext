@@ -5,11 +5,20 @@
   </picture>
 </p>
 
+<h3 align="center">面向 AI Agent 的开源上下文服务</h3>
 <p align="center">
-  <a href="#快速开始"><b>开始使用</b></a> &nbsp; · &nbsp;
-  <a href="#效果证据">效果证据</a> &nbsp; · &nbsp;
-  <a href="#让上下文在更多场景中发挥作用">应用场景</a> &nbsp; · &nbsp;
-  <a href="https://powercontext.oceanbase.io/zh/docs/">文档</a> &nbsp; · &nbsp;
+  让 Agent 少走弯路、少花 Token。<br />
+  <a href="#记忆与协同">个性化记忆</a> · <a href="#记忆与协同">任务交接</a> · <a href="#记忆与协同">Dream 自进化</a> · <a href="#记忆与协同">多 Agent 共享</a> · <a href="#可追溯与可管控">Scope 隔离</a>，都在同一个服务里。
+</p>
+
+<p align="center">
+  <a href="#powercontext-是什么">是什么</a> &nbsp;·&nbsp;
+  <a href="#为什么选-powercontext">为什么</a> &nbsp;·&nbsp;
+  <a href="#架构">架构</a> &nbsp;·&nbsp;
+  <a href="#快速开始"><b>快速开始</b></a> &nbsp;·&nbsp;
+  <a href="#生态">生态</a> &nbsp;·&nbsp;
+  <a href="#最新动态">最新动态</a> &nbsp;·&nbsp;
+  <a href="https://powercontext.oceanbase.io/zh/docs/">文档</a> &nbsp;·&nbsp;
   <a href="https://discord.com/invite/74cF8vbNEs">Discord</a>
 </p>
 <p align="center">
@@ -17,43 +26,45 @@
   <a href="https://pypi.org/project/powercontext/">Python package</a> · <a href="LICENSE">Apache 2.0</a>
 </p>
 
-## 为什么选 PowerContext？
+## PowerContext 是什么
 
-**准、快、省。让 Agent 找准上下文，少走弯路。** PowerContext 把相关知识、用户偏好、任务进展和已有经验带到当前任务，帮助 Agent 减少重复搜索、反复确认和无效尝试，把时间和 Token 用在推进工作上。
+**PowerContext 帮助 Agent 和 Harness 管理上下文。** 它把对话、资料和工作记录整理成可检索、可更新、可追溯的知识，在需要时交给 Agent：
 
-- **准：提供当前需要的上下文。** 按任务查找相关知识和代码，保留依据，使用代码前检查是否已更新。
-- **快：少摸索，少往返。** 接着已有进度做，参考已确认的方法和约束，减少重新理解背景与反复试错的时间。
-- **省：减少完成任务的总开销。** 让一次模型调用更有效，减少不必要的推理和工具往返，也少让用户等待、重讲背景。
+- **节省 Token：** 帮 Agent 找对代码、读对内容，减少完成任务所需的往返。[查看评测 →](#节省-token)
+- **多 Agent 协同：** 多个 Agent、会话和同事共用同一个 Scope 的记忆，用任务交接接续进度。[了解更多 →](#记忆与协同)
+- **自我进化：** Dream 根据过往依据提出记忆和提示词修订，经你审核后生效。[了解更多 →](#记忆与协同)
+- **准确可追溯：** 每条记忆都能追溯到来源证据和精确版本。[了解更多 →](#可追溯与可管控)
+- **安全可控：** 按 Scope 隔离数据和权限，生成的经验和技能经审核后才会被召回。[了解更多 →](#可追溯与可管控)
 
-## PowerContext 是什么？
+可以直接运行服务，通过 HTTP、MCP、Python 或 Agent 集成接入，也可以将 Core 嵌入自己的应用。
 
-**PowerContext 是面向 AI Agent 的开源上下文服务。** 它把对话、资料和工作记录整理成可检索、可更新、可追溯的知识，让 Agent 了解这个人、掌握这个项目、接着上次的进度工作。
+<!-- 视频位置：30–60 秒真实录屏，展示 Agent 在第二个会话中接着第一个会话的进度工作。 -->
+<table width="100%">
+  <tr>
+    <td width="50%" valign="top"><img src="docs/assets/screenshots/dashboard-memory-zh.png" width="100%" alt="Dashboard 记忆页：按类型列出决定和约束，每条都带来源和版本" /><br /><sub><b>记忆</b> · 决定和约束都带来源和版本</sub></td>
+    <td width="50%" valign="top"><img src="docs/assets/screenshots/dashboard-handoff-zh.png" width="100%" alt="Dashboard 任务交接页：记录已完成的进度、下一步和未覆盖的内容" /><br /><sub><b>任务交接</b> · 已完成的进度、下一步和遗漏项</sub></td>
+  </tr>
+</table>
 
-[丰富制品，让知识各得其所 →](https://powercontext.oceanbase.io/zh/docs/workflows/artifacts/) · [Dream 自进化，让经验持续更新 →](https://powercontext.oceanbase.io/zh/docs/workflows/review-dream-revisions/) · [灵活插件，按业务扩展 →](https://powercontext.oceanbase.io/zh/docs/develop/plugins/)
+## 为什么选 PowerContext
 
-可以直接运行服务，通过 HTTP、MCP、Python 或 Agent 集成接入，也可以将 Core 嵌入自己的应用。[了解产品与工作流 →](https://powercontext.oceanbase.io/zh/docs/workflows/memory-and-handoff/)
+### 节省 Token
 
-## 效果证据
+**Agent 每调用一次模型，都要把累积的上下文重新发送一遍。** 所以 PowerContext 优化的是完成整项任务的往返次数和总开销：帮 Agent 找对代码、读对内容、合并独立操作、只跑相关测试，减少重复探索和无效尝试。
 
-**省下 Token，也省下模型成本。** 在 SWE-bench Pro 同 24 道题的对比中，计入记忆生成后，Token 总量减少 **32.57%**，估算模型成本减少 **15.42%**；两组解出的是**相同的 16 题**。
-
-**只看解题，Token 减少 40.30%；计入记忆生成成本后，仍减少 32.57%。** 记忆还可以在后续会话中反复复用，让已积累的知识继续发挥价值。本次测试衡量当轮开销，后续复用的收益尚未计入。
-
-**单题最高省下 63.49% Token、51.98% 估算模型成本。** 第 456 题，两组均通过，Token 从 230 万降到 84 万，已计入记忆生成。
-
-[查看 24 题评测：逐题结果、统计口径与复现配置 →](docs/benchmarks/token-savings/README_CN.md)
-
-### 编程场景：少走弯路，少花 Token
-
-**让每次推理更有效，减少完成任务所需的往返。** 相关代码、明确的工作要求和已有经验，能帮助 Agent 更快找到下一步该做什么。我们关注完成整项任务所花的时间和 Token，把重复探索、重读背景和无效尝试作为优化重点。
+- **同 24 题，计入记忆生成：** Token 减少 **32.57%**，估算模型成本降低 **15.42%**，两组解出相同的 16 题。只看解题，Token 减少 40.30%；单题最高减少 63.49%。
+- **往返更少：** 在同一批题号的另一轮实验（OFF 对比 MS）中，主模型请求从 708 次降到 539 次，减少 **23.87%**。这一轮的配置与上面不同，两组数字不能合并计算。
+- **记忆生成也复用缓存：** 生成记忆要花 Token，上面的 32.57% 已经计入。网关模式下可以复用解题请求的上下文前缀；记录了缓存字段的记忆生成调用中，97% 的输入命中了缓存。
 
 本次评测采用**网关模式**，同时开启代码检索、工作指导和项目记忆：
 
 <img src="docs/assets/readme-capabilities-zh.svg" width="100%" alt="代码检索：查找相关代码，检查代码是否已更新。工作指导：明确读取、修改和验证要求。项目记忆：保存项目决定，供后续会话使用。" />
 
-**生成记忆，也复用已有缓存。** 上面的 32.57% 已计入记忆生成开销。PowerContext 在网关模式下可以开启前缀缓存记忆提取，在满足条件时复用解题请求的上下文前缀，降低缓存命中部分的输入成本。本次评测中，记录了缓存字段的记忆生成调用，97% 的输入命中了缓存。 [查看独立的记忆提取成本与质量评测 →](https://gist.github.com/jasper-yl/d02bfb7d9b45ca175bf74ad09cfa5ba4#file-01-report-zh-md)
+[24 题评测：逐题结果与统计口径 →](docs/benchmarks/token-savings/README_CN.md) · [主模型请求次数 →](docs/benchmarks/token-savings/request-counts_CN.md) · [记忆提取的成本与质量 →](https://gist.github.com/jasper-yl/d02bfb7d9b45ca175bf74ad09cfa5ba4#file-01-report-zh-md)
 
-## 让上下文在更多场景中发挥作用
+### 记忆与协同
+
+多个 Agent、会话和同事可以共用同一个 Scope 的记忆；每个人也能定制自己的记忆规则。
 
 <!-- Each card is editable HTML; keep text and links aligned across the three READMEs. -->
 <table width="100%">
@@ -105,7 +116,42 @@
   </tr>
 </table>
 
+### 可追溯与可管控
+
+- **有据可查：** 每条记忆都能追溯到来源证据和精确版本，并可定位到来源中的具体位置。
+- **改动经过审核：** 生成的经验和技能经审核后才会被召回；Dream 的修订由你批准后生效；过时的记忆可以停用，历史版本保留。
+- **边界清晰：** 按 Scope 隔离数据和访问权限；运行遥测不包含提示词、正文和模型响应。
+
+[审核候选内容 →](https://powercontext.oceanbase.io/zh/docs/workflows/review-candidates/) · [Scope 与访问控制 →](https://powercontext.oceanbase.io/zh/docs/workflows/scopes-and-access/)
+
+## 架构
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/readme-architecture-zh-dark.svg" />
+  <img src="docs/assets/readme-architecture-zh-light.svg" width="100%" alt="PowerContext 架构：Agent 和应用通过 Hooks、MCP、SDK 或可选的网关接入 PowerContext Server；Server 按 Scope 管理 Source，经后台处理生成 Artifact，再召回组装成 PreparedContext；存储可选 SQLite、OceanBase 或 seekDB，并按需调用生成和向量模型。" />
+</picture>
+
+Agent 通过 Hooks、MCP 或 SDK 接入 Server；也可以让模型请求经过网关，由网关注入上下文、提供工作指导。Server 按 Scope 保存来源证据（Source），后台把证据整理成记忆、主题记忆、画像、经验和技能等制品（Artifact），需要时再召回、组装成下一轮使用的上下文。[架构与职责边界 →](https://powercontext.oceanbase.io/zh/docs/workflows/architecture/)
+
 ## 快速开始
+
+### 让 Agent 帮你安装
+
+把下面这段话复制给你的 Agent（以 Codex 为例）：
+
+```text
+帮我安装 PowerContext 并接入 Codex。PowerContext 是面向 AI Agent 的开源上下文服务（https://github.com/oceanbase/powercontext），下面的命令和链接都来自官方文档。
+
+1. 运行官方安装脚本。它需要联网，并会写入我的用户目录；如果沙箱拦截，请先征求我的同意。下载很慢时，在命令末尾加上 -s -- --region cn 改用国内镜像：
+   curl -fsSL https://powercontext.oceanbase.io/install.sh | bash
+2. 阅读快速开始文档，按步骤带我完成配置、启动服务、创建并绑定 Scope、安装 Codex 集成：
+   https://powercontext.oceanbase.io/zh/llms.mdx/docs/get-started/quickstart/content.md
+   配置向导是交互式的：请让我在自己的终端里运行 powercontext config init --output .env，不要替我回答。涉及模型密钥等选择时先问我。
+3. 完成后告诉我：如何在 Codex 里用 /hooks 信任 PowerContext 的 Hook，以及如何验证记忆已经生效。
+```
+
+<details>
+<summary><b>自己动手安装</b></summary>
 
 需要 Python 3.11+、Git 和 [uv](https://docs.astral.sh/uv/getting-started/installation/)；接入 Agent 时还需安装对应的 CLI。以下命令安装 **1.5.2**，适用于 macOS 和 Linux；Windows 为实验性支持。需要自动准备 Python 和 uv 时，可使用[安装脚本](https://powercontext.oceanbase.io/zh/docs/get-started/install-and-run/#使用推荐安装脚本)。
 
@@ -152,7 +198,9 @@ powercontext doctor codex
 
 <sub>以上命令用于启动服务。要复现测试中的网关、代码检索和工作指导配置，请查看详细报告。</sub>
 
-## 接入你的工作流
+</details>
+
+## 生态
 
 <!-- Add integrations using an original logo asset, a product name, and a documentation link. -->
 <table width="100%">
@@ -185,8 +233,22 @@ Codex 为官方维护；其余 Agent 和 Python 框架集成为社区维护；Bu
 
 **应用与团队** — [Python / HTTP / MCP](https://powercontext.oceanbase.io/zh/docs/develop/interfaces/) · [记忆与任务交接](https://powercontext.oceanbase.io/zh/docs/workflows/memory-and-handoff/) · [部署与访问控制](https://powercontext.oceanbase.io/zh/docs/workflows/scopes-and-access/)
 
----
+## 最新动态
 
-[文档](https://powercontext.oceanbase.io/zh/docs/) · [参与贡献](https://github.com/oceanbase/powercontext/blob/master/CONTRIBUTING.md) · [报告问题](https://github.com/oceanbase/powercontext/issues) · [Discord](https://discord.com/invite/74cF8vbNEs)
+- **2026-11-16 · [v1.5.2](https://github.com/oceanbase/powercontext/releases/tag/powercontext-v1.5.2)** — 批量写入和查询优化：维护者实测写入吞吐提升约 190%、查询吞吐提升约 171%（对比 v1.5.1）；Dashboard 原生展示处理进度、失败诊断和 Token 用量。
+- **2026-11-09 · [v1.5.1](https://github.com/oceanbase/powercontext/releases/tag/powercontext-v1.5.1)** — 记忆可追溯到来源中的精确位置；新增可选的监控栈，覆盖指标、日志和链路追踪。
+- **2026-11-03 · [v1.5.0](https://github.com/oceanbase/powercontext/releases/tag/powercontext-v1.5.0)** — Source 与 Artifact 插件，可扩展数据接入和自定义制品；用可逆编码减少模型输入中的重复证据。
 
-PowerContext 是[PowerMem](https://www.powermem.ai/)的后续项目，采用[Apache 2.0](LICENSE)发布。
+[全部版本 →](https://github.com/oceanbase/powercontext/releases)
+
+## 了解更多
+
+- [核心概念](https://powercontext.oceanbase.io/zh/docs/get-started/core-concepts/) · [架构与职责边界](https://powercontext.oceanbase.io/zh/docs/workflows/architecture/) · [插件开发](https://powercontext.oceanbase.io/zh/docs/develop/plugins/)
+- [Python / HTTP / MCP 接口](https://powercontext.oceanbase.io/zh/docs/develop/interfaces/) · [部署 Server](https://powercontext.oceanbase.io/zh/docs/operate/deploy-server/)
+- [Token 评测报告](docs/benchmarks/token-savings/README_CN.md) · [博客](https://powercontext.oceanbase.io/zh/blog/)
+
+## 社区
+
+[Discord](https://discord.com/invite/74cF8vbNEs) · [报告问题](https://github.com/oceanbase/powercontext/issues) · [参与贡献](https://github.com/oceanbase/powercontext/blob/master/CONTRIBUTING.md)
+
+PowerContext 是 [PowerMem](https://www.powermem.ai/) 的后续项目，采用 [Apache 2.0](LICENSE) 发布。
