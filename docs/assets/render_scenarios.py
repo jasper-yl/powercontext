@@ -4,7 +4,7 @@
 """Write the README scenario cards as light and dark SVGs for each language.
 
 Run: python3 docs/assets/render_scenarios.py
-Outputs scenarios/card-{handoff,shared,personal,learning}-{en,zh,ja}-{light,dark}.svg.
+Outputs scenarios/card-{handoff,shared,personal,learning,skills,trace}-{en,zh,ja}-{light,dark}.svg.
 The sample project matches the Dashboard screenshots (an inventory schema migration).
 """
 
@@ -32,8 +32,8 @@ COPY = {
         },
         "shared": {
             "tag": "共享 Scope", "title": "多个 Agent，共用一份记忆",
-            "lead": "Codex 里定下的约定，Claude Code 和同事也知道。",
-            "a": "Codex", "b": "Claude Code", "c": "同事", "scope": "同一个 Scope",
+            "lead": "在 Codex 里定下的约定，换到 Claude Code、Kimi Code 也知道。",
+            "a": "Codex", "b": "Claude Code", "c": "Kimi Code", "scope": "同一个 Scope",
             "rows": ("决定", "约束", "进度"),
         },
         "personal": {
@@ -49,6 +49,18 @@ COPY = {
             "steps": ("日常讨论", "主题摘要", "Dream 提出修订", "你来审核"),
             "note": "Dream 根据过往依据提出修订，批准后才生效",
         },
+        "skills": {
+            "tag": "经验与技能", "title": "做过一次，下次就会",
+            "lead": "验证过的做法沉淀为经验和技能，审核后导出给 Agent。",
+            "case": "一次成功的排查", "c1": "情境：测试偶发失败", "c2": "做法：先固定随机种子", "c3": "结果：稳定通过",
+            "skill": "技能：排查偶发失败", "k1": "✓ 已审核", "k2": "→ 导出到 Codex",
+        },
+        "trace": {
+            "tag": "来源与版本", "title": "每条记忆，都有出处",
+            "lead": "回答带着来源，能追到当时的记录和确切版本。",
+            "who": "Agent 的回答", "answer": "迁移期间保留旧的 SKU 映射。",
+            "src": "来源 [1]", "r1": "会话记录 · 周一", "r2": "第 40–55 行", "r3": "记忆版本 @1",
+        },
     },
     "en": {
         "handoff": {
@@ -60,15 +72,15 @@ COPY = {
         },
         "shared": {
             "tag": "Shared Scope", "title": "One memory for every agent",
-            "lead": "A rule agreed in Codex is known in Claude Code and by teammates.",
-            "a": "Codex", "b": "Claude Code", "c": "Teammates", "scope": "One Scope",
+            "lead": "A rule agreed in Codex carries over to Claude Code and OpenCode.",
+            "a": "Codex", "b": "Claude Code", "c": "OpenCode", "scope": "One Scope",
             "rows": ("Decisions", "Constraints", "Progress"),
         },
         "personal": {
             "tag": "Profile & memory rules", "title": "Your habits, your rules",
             "lead": "Say a preference once. You decide what is kept and how.",
-            "say": "“Use Yuque for reviews.”", "profile": "Your profile",
-            "p1": "Docs: Yuque", "p2": "Writing: conclusion first",
+            "say": "“Use Notion for reviews.”", "profile": "Your profile",
+            "p1": "Docs: Notion", "p2": "Writing: conclusion first",
             "rule": "Memory rule", "rule1": "Long-term decisions only",
         },
         "learning": {
@@ -76,6 +88,19 @@ COPY = {
             "lead": "Discussions become topics; lessons update after your review.",
             "steps": ("Discuss", "Summarize", "Dream revises", "You approve"),
             "note": "Dream proposes revisions from past evidence; they apply once approved",
+        },
+        "skills": {
+            "tag": "Experience & Skills", "title": "Solved once, reused next time",
+            "lead": "Proven approaches become experiences and skills, exported after review.",
+            "case": "A fix that worked", "c1": "Situation: flaky test", "c2": "Action: pin the seed",
+            "c3": "Outcome: passes reliably",
+            "skill": "Skill: fix flaky tests", "k1": "✓ Approved", "k2": "→ Exported to Codex",
+        },
+        "trace": {
+            "tag": "Sources & revisions", "title": "Every memory has a source",
+            "lead": "Answers cite where they came from, down to the exact revision.",
+            "who": "Agent answer", "answer": "Keep the old SKU mapping.",
+            "src": "Source [1]", "r1": "Session log · Monday", "r2": "Lines 40–55", "r3": "Memory revision @1",
         },
     },
     "ja": {
@@ -88,15 +113,15 @@ COPY = {
         },
         "shared": {
             "tag": "共有 Scope", "title": "複数の Agent で、ひとつの記憶",
-            "lead": "Codex で決めた約束を、Claude Code もチームも知っている。",
-            "a": "Codex", "b": "Claude Code", "c": "チームメンバー", "scope": "同じ Scope",
+            "lead": "Codex で決めた約束を、Claude Code や OpenCode でも共有。",
+            "a": "Codex", "b": "Claude Code", "c": "OpenCode", "scope": "同じ Scope",
             "rows": ("判断", "制約", "進捗"),
         },
         "personal": {
             "tag": "プロファイルと記憶ルール", "title": "あなたの習慣とルールを覚える",
             "lead": "好みは一度伝えるだけ。何をどう残すかはあなたが決める。",
-            "say": "「設計レビューは語雀で。」", "profile": "あなたのプロファイル",
-            "p1": "ドキュメント：語雀", "p2": "文章：結論が先",
+            "say": "「レビューは Notion で。」", "profile": "あなたのプロファイル",
+            "p1": "ドキュメント：Notion", "p2": "文章：結論が先",
             "rule": "記憶ルール", "rule1": "長期の判断と制約だけ残す",
         },
         "learning": {
@@ -104,6 +129,19 @@ COPY = {
             "lead": "議論はトピックにまとまり、経験はレビュー後に更新。",
             "steps": ("日々の議論", "トピック要約", "Dream が改訂案", "あなたが承認"),
             "note": "Dream が過去の根拠から改訂を提案し、承認後に反映",
+        },
+        "skills": {
+            "tag": "経験とスキル", "title": "一度解けば、次から使える",
+            "lead": "検証済みのやり方を経験とスキルに。レビュー後に Agent へ。",
+            "case": "うまくいった調査", "c1": "状況：テストがときどき失敗", "c2": "対応：乱数シードを固定",
+            "c3": "結果：安定して成功",
+            "skill": "スキル：不安定テスト対応", "k1": "✓ 承認済み", "k2": "→ Codex へエクスポート",
+        },
+        "trace": {
+            "tag": "出典とリビジョン", "title": "すべての記憶に、出典がある",
+            "lead": "回答は出典つき。当時の記録と正確なリビジョンまでたどれる。",
+            "who": "Agent の回答", "answer": "移行中は旧 SKU 対応を残す。",
+            "src": "出典 [1]", "r1": "セッション記録 · 月曜", "r2": "40–55 行目", "r3": "記憶リビジョン @1",
         },
     },
 }
@@ -186,7 +224,44 @@ def learning(c, t):
     return "".join(parts)
 
 
-SCENES = {"handoff": handoff, "shared": shared, "personal": personal, "learning": learning}
+def skills(c, t):
+    return "".join([
+        rect(32, 150, 262, 176, t),
+        text(50, 180, c["case"], t, 14, 700, "muted"),
+        text(50, 218, c["c1"], t, 15, 400, "ink2"),
+        text(50, 250, c["c2"], t, 15, 400, "ink2"),
+        text(50, 282, c["c3"], t, 15, 400, "ink2"),
+        arrow(300, 238, 336, 238, t, "accent"),
+        rect(346, 150, 262, 176, t, stroke="accent"),
+        text(364, 184, c["skill"], t, 16, 700, "accent"),
+        rect(364, 204, 226, 40, t, fill="soft", stroke="soft", r=8),
+        text(378, 230, c["k1"], t, 15, 600, "ok"),
+        rect(364, 256, 226, 40, t, fill="card", stroke="card", r=8),
+        text(378, 282, c["k2"], t, 15, 600, "ink"),
+    ])
+
+
+def trace(c, t):
+    return "".join([
+        rect(32, 170, 272, 96, t, fill="soft", stroke="soft", r=12),
+        text(48, 198, c["who"], t, 13, 700, "muted"),
+        text(48, 232, c["answer"], t, 15, 600, "ink"),
+        f'<rect x="262" y="182" width="30" height="22" rx="11" fill="{t["accent"]}"/>',
+        text(277, 198, "1", t, 13, 700, "bg", "middle"),
+        arrow(310, 218, 328, 218, t, "accent"),
+        rect(334, 150, 274, 176, t, stroke="accent"),
+        text(352, 182, c["src"], t, 16, 700, "accent"),
+        rect(352, 198, 238, 34, t, fill="card", stroke="card", r=8),
+        text(366, 220, c["r1"], t, 14.5, 400, "ink2"),
+        rect(352, 238, 238, 34, t, fill="card", stroke="card", r=8),
+        text(366, 260, c["r2"], t, 14.5, 400, "ink2"),
+        rect(352, 278, 238, 34, t, fill="card", stroke="card", r=8),
+        text(366, 300, c["r3"], t, 14.5, 400, "ink2"),
+    ])
+
+
+SCENES = {"handoff": handoff, "shared": shared, "personal": personal, "learning": learning,
+          "skills": skills, "trace": trace}
 
 
 def card(scene, lang, theme):
