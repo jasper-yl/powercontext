@@ -93,11 +93,11 @@ PowerContext は、個人が使うコーディング Agent にも、チームや
 ## アーキテクチャ
 
 <picture>
-  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/readme-architecture-en-dark.svg" />
-  <img src="docs/assets/readme-architecture-en-light.svg" width="100%" alt="PowerContext のアーキテクチャ：Agent とアプリケーションは Hooks、MCP、SDK、または任意のゲートウェイから PowerContext Server に接続します。Server は Scope ごとに Source を保存し、バックグラウンド処理で Artifact を生成し、PreparedContext として想起・組み立てます。ストレージは SQLite、OceanBase、seekDB から選び、必要に応じて生成モデルと埋め込みモデルを呼び出します。" />
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/readme-architecture-ja-dark.svg" />
+  <img src="docs/assets/readme-architecture-ja-light.svg" width="100%" alt="PowerContext のアーキテクチャ：Agent とアプリは Hooks、MCP、SDK、または任意のゲートウェイから PowerContext Server に接続します。Server は Scope ごとに Source を処理して記憶、トピック、プロファイル、経験、スキル、引き継ぎなどの Artifact を作り、次のターンのコンテキストとして想起します。Source と Artifact のプラグインでデータ源と Artifact の種類を拡張できます。処理には生成モデルと埋め込みモデルを使い、データは SQLite、OceanBase、seekDB に保存します。" />
 </picture>
 
-Agent は Hooks、MCP、SDK で Server に接続します。モデルへのリクエストをゲートウェイ経由にすると、ゲートウェイがコンテキストを注入し、作業ガイダンスを提供します。Server は Scope ごとに根拠（Source）を保存し、バックグラウンドで記憶、Topic Memory、プロファイル、経験、スキルなどの Artifact に整理し、次のターンで使うコンテキストとして想起・組み立てます。[アーキテクチャと責任範囲 →](https://powercontext.oceanbase.io/en/docs/workflows/architecture/)
+Agent は Hooks、MCP、SDK で Server に接続します。モデルへのリクエストをゲートウェイ経由にすると、ゲートウェイがコンテキストを注入し、作業ガイダンスを提供します。Server は Scope ごとに根拠（Source）を保存し、バックグラウンドで記憶、Topic Memory、プロファイル、経験、スキルなどの Artifact に整理し、次のターンで使うコンテキストとして想起・組み立てます。Source と Artifact のプラグインで、新しいデータ源や Artifact の種類を追加できます。[アーキテクチャと責任範囲 →](https://powercontext.oceanbase.io/en/docs/workflows/architecture/)
 
 ## クイックスタート
 

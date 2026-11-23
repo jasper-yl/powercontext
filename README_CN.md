@@ -94,10 +94,10 @@ PowerContext 既能接入个人使用的编程 Agent，也能嵌入团队和企�
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/readme-architecture-zh-dark.svg" />
-  <img src="docs/assets/readme-architecture-zh-light.svg" width="100%" alt="PowerContext 架构：Agent 和应用通过 Hooks、MCP、SDK 或可选的网关接入 PowerContext Server；Server 按 Scope 管理 Source，经后台处理生成 Artifact，再召回组装成 PreparedContext；存储可选 SQLite、OceanBase 或 seekDB，并按需调用生成和向量模型。" />
+  <img src="docs/assets/readme-architecture-zh-light.svg" width="100%" alt="PowerContext 架构：Agent 和应用通过 Hooks、MCP、SDK 或可选的网关接入 PowerContext Server；Server 按 Scope 隔离，把 Source 经后台处理生成记忆、主题记忆、画像、经验、技能和交接等 Artifact，再召回组装成下一轮的上下文；Source 插件和 Artifact 插件可以扩展数据来源和制品类型；后台处理调用生成和向量模型，数据存储在 SQLite、OceanBase 或 seekDB。" />
 </picture>
 
-Agent 通过 Hooks、MCP 或 SDK 接入 Server；也可以让模型请求经过网关，由网关注入上下文、提供工作指导。Server 按 Scope 保存来源证据（Source），后台把证据整理成记忆、主题记忆、画像、经验和技能等制品（Artifact），需要时再召回、组装成下一轮使用的上下文。[架构与职责边界 →](https://powercontext.oceanbase.io/zh/docs/workflows/architecture/)
+Agent 通过 Hooks、MCP 或 SDK 接入 Server；也可以让模型请求经过网关，由网关注入上下文、提供工作指导。Server 按 Scope 保存来源证据（Source），后台把证据整理成记忆、主题记忆、画像、经验和技能等制品（Artifact），需要时再召回、组装成下一轮使用的上下文。Source 插件和 Artifact 插件可以接入新的数据来源、定义新的制品类型。[架构与职责边界 →](https://powercontext.oceanbase.io/zh/docs/workflows/architecture/)
 
 ## 快速开始
 

@@ -94,10 +94,10 @@ PowerContext works with coding agents for individuals and embeds into applicatio
 
 <picture>
   <source media="(prefers-color-scheme: dark)" srcset="docs/assets/readme-architecture-en-dark.svg" />
-  <img src="docs/assets/readme-architecture-en-light.svg" width="100%" alt="PowerContext architecture: agents and apps connect to PowerContext Server through hooks, MCP, SDKs, or an optional gateway. The Server keeps Sources per Scope, processes them into Artifacts in the background, and recalls them into PreparedContext. Storage is SQLite, OceanBase, or seekDB, with generation and embedding models called as needed." />
+  <img src="docs/assets/readme-architecture-en-light.svg" width="100%" alt="PowerContext architecture: agents and apps connect to PowerContext Server through hooks, MCP, SDKs, or an optional gateway. Within each Scope, the Server processes Sources into Artifacts such as memories, topics, profiles, experiences, skills, and handoffs, then recalls them into context for the next turn. Source and Artifact plugins extend the data sources and artifact types. Processing calls generation and embedding models, and data is stored in SQLite, OceanBase, or seekDB." />
 </picture>
 
-Agents connect to the Server through hooks, MCP, or SDKs, or send model requests through the gateway, which injects context and provides working guidance. The Server keeps source evidence (Sources) per Scope, processes it in the background into Artifacts such as memories, Topic Memory, profiles, experiences, and skills, and recalls them into context for the next turn. [Architecture and responsibilities →](https://powercontext.oceanbase.io/en/docs/workflows/architecture/)
+Agents connect to the Server through hooks, MCP, or SDKs, or send model requests through the gateway, which injects context and provides working guidance. The Server keeps source evidence (Sources) per Scope, processes it in the background into Artifacts such as memories, Topic Memory, profiles, experiences, and skills, and recalls them into context for the next turn. Source and Artifact plugins add new data sources and artifact types. [Architecture and responsibilities →](https://powercontext.oceanbase.io/en/docs/workflows/architecture/)
 
 ## Quick start
 
