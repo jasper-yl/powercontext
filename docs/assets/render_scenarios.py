@@ -4,7 +4,7 @@
 """Write the README use-case cards as light and dark SVGs for each language.
 
 Run: python3 docs/assets/render_scenarios.py
-Outputs scenarios/card-{handoff,shared,knowledge,users,domain,plugins}-{en,zh,ja}-{light,dark}.svg.
+Outputs scenarios/card-{handoff,shared,assistant,office,knowledge,users,domain,plugins}-{en,zh,ja}-{light,dark}.svg.
 Each card stays within a documented capability; the linked workflow pages in the READMEs are the source.
 """
 
@@ -60,6 +60,19 @@ COPY = {
             "src": "工单 OPS-7", "f1": "支付回调超时", "f2": "状态：已解决",
             "art": "工单摘要（自定义制品）", "a1": "原因：证书过期", "a2": "处理：轮换证书", "a3": "来源：OPS-7",
         },
+        "assistant": {
+            "tag": "个人助理", "title": "个人助理，记得你交代的事",
+            "lead": "OpenClaw 在长对话压缩前先存下要点，换个聊天也记得。",
+            "chat": "聊了一整天", "compact": "上下文压缩", "save": "先保存",
+            "memory": "记忆", "m1": "周三的会改到上午 10 点", "m2": "订机票优先靠窗座位",
+            "next": "第二天开个新聊天，助理照样记得",
+        },
+        "office": {
+            "tag": "办公 Agent", "title": "办公流程，做过一次就会",
+            "lead": "跑通的流程沉淀为经验和技能，审核后下次直接用。",
+            "case": "第一次：月度报表", "c1": "1  从三个系统导出数据", "c2": "2  合并并核对差异", "c3": "3  发给财务",
+            "skill": "技能：生成月度报表", "k1": "✓ 已审核", "k2": "→ 下个月直接调用",
+        },
     },
     "en": {
         "handoff": {
@@ -100,6 +113,20 @@ COPY = {
             "art": "Ticket summary (custom)", "a1": "Cause: expired certificate", "a2": "Fix: rotate certificate",
             "a3": "Source: OPS-7",
         },
+        "assistant": {
+            "tag": "Personal assistant", "title": "An assistant that remembers",
+            "lead": "OpenClaw saves key points before the context is compacted.",
+            "chat": "A day of chatting", "compact": "Context compaction", "save": "save",
+            "memory": "Memory", "m1": "Wednesday meeting at 10 am", "m2": "Window seats on flights",
+            "next": "A new chat the next day still knows",
+        },
+        "office": {
+            "tag": "Office agents", "title": "Office work, learned once",
+            "lead": "A process that worked becomes a skill, reused after review.",
+            "case": "First time: monthly report", "c1": "1  Export from three systems", "c2": "2  Merge and reconcile",
+            "c3": "3  Send to finance",
+            "skill": "Skill: monthly report", "k1": "✓ Approved", "k2": "→ Reused next month",
+        },
     },
     "ja": {
         "handoff": {
@@ -139,6 +166,20 @@ COPY = {
             "src": "チケット OPS-7", "f1": "決済コールバックの遅延", "f2": "状態：解決済み",
             "art": "チケット要約（独自形式）", "a1": "原因：証明書の期限切れ", "a2": "対処：証明書を更新",
             "a3": "出典：OPS-7",
+        },
+        "assistant": {
+            "tag": "パーソナルアシスタント", "title": "頼んだことを覚えている助手",
+            "lead": "OpenClaw は会話の圧縮前に要点を保存し、次のチャットでも覚えている。",
+            "chat": "一日中の会話", "compact": "コンテキスト圧縮", "save": "保存",
+            "memory": "記憶", "m1": "水曜の会議は午前 10 時に", "m2": "飛行機は窓側の席を優先",
+            "next": "翌日の新しいチャットでも覚えている",
+        },
+        "office": {
+            "tag": "オフィス Agent", "title": "業務の手順を、一度で覚える",
+            "lead": "うまくいった手順を経験とスキルに。レビュー後に再利用。",
+            "case": "初回：月次レポート", "c1": "1  3 つのシステムから出力", "c2": "2  統合して差異を確認",
+            "c3": "3  経理に送付",
+            "skill": "スキル：月次レポート", "k1": "✓ 承認済み", "k2": "→ 翌月はそのまま実行",
         },
     },
 }
@@ -261,8 +302,41 @@ def plugins(c, t):
     ])
 
 
-SCENES = {"handoff": handoff, "shared": shared, "knowledge": knowledge, "users": users, "domain": domain,
-          "plugins": plugins}
+def assistant(c, t):
+    parts = [rect(32, 150, 250, 176, t), text(50, 180, c["chat"], t, 14, 700, "muted")]
+    for i, w in enumerate((170, 120, 190, 140)):
+        y = 194 + i * 26 + (18 if i >= 2 else 0)
+        parts.append(rect(50, y, w, 16, t, fill="line", stroke="line", r=8))
+    parts += [f'<path d="M44 251H270" stroke="{t["accent"]}" stroke-width="1.5" stroke-dasharray="5 4"/>',
+              text(270, 247, c["compact"], t, 11.5, 600, "accent", "end"),
+              arrow(288, 220, 330, 220, t, "accent"),
+              text(309, 211, c["save"], t, 11.5, 600, "accent", "middle"),
+              rect(334, 150, 274, 132, t, stroke="accent"),
+              text(352, 180, c["memory"], t, 16, 700, "accent"),
+              chips(352, 196, (c["m1"], c["m2"]), t, w=238),
+              text(334, 312, c["next"], t, 14, 400, "ink2")]
+    return "".join(parts)
+
+
+def office(c, t):
+    return "".join([
+        rect(32, 150, 262, 176, t),
+        text(50, 180, c["case"], t, 14, 700, "muted"),
+        text(50, 218, c["c1"], t, 15, 400, "ink2"),
+        text(50, 250, c["c2"], t, 15, 400, "ink2"),
+        text(50, 282, c["c3"], t, 15, 400, "ink2"),
+        arrow(300, 238, 336, 238, t, "accent"),
+        rect(346, 150, 262, 176, t, stroke="accent"),
+        text(364, 184, c["skill"], t, 16, 700, "accent"),
+        rect(364, 204, 226, 40, t, fill="soft", stroke="soft", r=8),
+        text(378, 230, c["k1"], t, 15, 600, "ok"),
+        rect(364, 256, 226, 40, t, fill="card", stroke="card", r=8),
+        text(378, 282, c["k2"], t, 15, 600, "ink"),
+    ])
+
+
+SCENES = {"handoff": handoff, "shared": shared, "assistant": assistant, "office": office, "knowledge": knowledge,
+          "users": users, "domain": domain, "plugins": plugins}
 
 
 def card(scene, lang, theme):
