@@ -5,6 +5,7 @@
 
 Run: python3 docs/assets/render_scenarios.py
 Outputs scenarios/card-{handoff,shared,assistant,office,knowledge,users,domain,plugins}-{en,zh,ja}-{light,dark}.svg.
+Also writes readme-prompt-rules-{en,zh,ja}-{light,dark}.svg, the full-width per-Scope prompt figure.
 Each card stays within a documented capability; the linked workflow pages in the READMEs are the source.
 """
 
@@ -361,6 +362,80 @@ def card(scene, lang, theme):
     ])
 
 
+RULES = {
+    "zh": {
+        "tag": "按 Scope 定制提示词", "title": "同一个服务，每个 Scope 一套记忆规则",
+        "lead": "记忆提取、合并、画像和主题记忆的提示词都能按 Scope 定制，并保留版本。",
+        "server": "PowerContext Server", "deploy": "一套部署", "default": "其余 Scope：内置指令",
+        "rows": (("法务团队", "只记合同条款和截止日期", "记忆提取 · 第 3 版"),
+                 ("销售 · 个人 Scope", "记住客户的偏好和沟通习惯", "画像生成 · 第 1 版"),
+                 ("研发项目", "新决定替换旧决定，保留原因", "记忆合并 · 第 2 版")),
+        "fixed": "服务端固定：输出结构 · 权限 · 证据边界 · 敏感信息保护",
+    },
+    "en": {
+        "tag": "Prompts per Scope", "title": "One service, memory rules for every Scope",
+        "lead": "Extraction, reconciliation, profile, and topic prompts are customized per Scope, with revisions.",
+        "server": "PowerContext Server", "deploy": "One deployment", "default": "Other Scopes: built-in",
+        "rows": (("Legal team", "Keep contract terms and deadlines only", "Extraction · rev 3"),
+                 ("Sales · personal Scope", "Remember client preferences and tone", "Profile · rev 1"),
+                 ("R&D project", "New decisions replace old, keep the why", "Reconcile · rev 2")),
+        "fixed": "Fixed by the server: output schema · permissions · evidence boundaries · sensitive-data safeguards",
+    },
+    "ja": {
+        "tag": "Scope ごとのプロンプト", "title": "ひとつのサービスで、Scope ごとの記憶ルール",
+        "lead": "抽出、統合、プロファイル、トピックのプロンプトを Scope ごとに設定でき、版も残ります。",
+        "server": "PowerContext Server", "deploy": "ひとつのデプロイ", "default": "他の Scope：組み込み",
+        "rows": (("法務チーム", "契約条件と期限だけを記憶", "抽出 · 第 3 版"),
+                 ("営業 · 個人の Scope", "顧客の好みと話し方を覚える", "プロファイル · 第 1 版"),
+                 ("研究開発", "新しい判断で更新し、理由も残す", "統合 · 第 2 版")),
+        "fixed": "サーバーが固定：出力形式 · 権限 · 根拠の範囲 · 機微情報の保護",
+    },
+}
+BANNER_WIDTH, BANNER_HEIGHT = 1280, 420
+
+
+def rules_banner(lang, theme):
+    """Full-width figure for the README's per-Scope memory rules."""
+    c, t = RULES[lang], THEMES[theme]
+    markers = "".join(
+        f'<marker id="head-{name}" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" '
+        f'orient="auto-start-reverse"><path d="M0 0L10 5L0 10Z" fill="{t[name]}"/></marker>'
+        for name in ("muted", "accent"))
+    tag_width = 26 + sum(13.5 if ord(ch) > 0x2E80 else 9.2 for ch in c["tag"])
+    parts = [
+        f'<svg xmlns="http://www.w3.org/2000/svg" width="{BANNER_WIDTH}" height="{BANNER_HEIGHT}" '
+        f'viewBox="0 0 {BANNER_WIDTH} {BANNER_HEIGHT}" role="img" aria-labelledby="title">'
+        f'<title id="title">{escape(c["title"])}</title><defs>{markers}</defs>',
+        f'<rect width="{BANNER_WIDTH}" height="{BANNER_HEIGHT}" fill="{t["bg"]}"/>',
+        f'<rect x="1" y="1" width="{BANNER_WIDTH - 2}" height="{BANNER_HEIGHT - 2}" rx="18" fill="{t["card"]}" '
+        f'stroke="{t["line"]}"/>',
+        f'<g font-family="{FONT}">',
+        f'<rect x="32" y="28" width="{tag_width:.0f}" height="26" rx="13" fill="{t["soft"]}"/>',
+        text(45, 46, c["tag"], t, 13.5, 700, "accent"),
+        text(32, 94, c["title"], t, 26, 800),
+        text(32, 126, c["lead"], t, 15.5, 400, "ink2"),
+        rect(32, 156, 236, 192, t, fill="soft", stroke="accent"),
+        text(50, 188, c["server"], t, 16, 700, "accent"),
+        text(50, 214, c["deploy"], t, 14, 400, "ink2"),
+        rect(50, 290, 200, 40, t, fill="box", stroke="line", r=8),
+        text(64, 315, c["default"], t, 13.5, 400, "ink2"),
+    ]
+    for i, (scope, rule, op) in enumerate(c["rows"]):
+        y = 156 + i * 68
+        parts += [arrow(272, 252, 334, y + 28, t, "accent"),
+                  rect(340, y, 908, 56, t, stroke="line"),
+                  text(358, y + 34, scope, t, 14, 700, "muted"),
+                  rect(580, y + 9, 420, 38, t, fill="soft", stroke="soft", r=8),
+                  text(596, y + 34, "“" + rule + "”" if lang != "ja" else "「" + rule + "」", t, 15, 600, "ink"),
+                  rect(1016, y + 9, 216, 38, t, fill="card", stroke="card", r=8),
+                  text(1030, y + 34, op, t, 13.5, 600, "ink2")]
+    parts += [f'<rect x="340" y="364" width="908" height="34" rx="8" fill="none" stroke="{t["line"]}" '
+              f'stroke-dasharray="5 4"/>',
+              text(358, 386, c["fixed"], t, 13.5, 600, "muted"),
+              "</g></svg>"]
+    return "".join(parts)
+
+
 def main():
     ASSETS.mkdir(exist_ok=True)
     for old in ASSETS.glob("card-*.svg"):
@@ -369,6 +444,10 @@ def main():
         for lang in COPY:
             for theme in THEMES:
                 (ASSETS / f"card-{scene}-{lang}-{theme}.svg").write_text(card(scene, lang, theme), encoding="utf-8")
+    for lang in RULES:
+        for theme in THEMES:
+            (ASSETS.parent / f"readme-prompt-rules-{lang}-{theme}.svg").write_text(rules_banner(lang, theme),
+                                                                                 encoding="utf-8")
     print(f"wrote {len(SCENES) * len(COPY) * len(THEMES)} cards to {ASSETS}")
 
 

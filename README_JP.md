@@ -8,7 +8,7 @@
 <h3 align="center">AI Agent のためのオープンソース・コンテキストサービス</h3>
 <p align="center">
   回り道を減らし、トークンを減らす。<br />
-  <a href="#ユースケース">タスクの引き継ぎ</a> · <a href="#ユースケース">複数 Agent での記憶共有</a> · <a href="#ユースケース">社内ナレッジベース</a> · <a href="#ユースケース">ユーザーごとのプロファイル</a> · <a href="https://powercontext.oceanbase.io/en/docs/workflows/review-dream-revisions/">Dream による自己進化</a> · <a href="#追跡と統制">Scope による分離</a> · <a href="#既存のサブスクリプションを使う">既存のサブスクリプションの活用</a>を、ひとつのサービスで。
+  <a href="#ユースケース">タスクの引き継ぎ</a> · <a href="#ユースケース">複数 Agent での記憶共有</a> · <a href="#ユースケース">社内ナレッジベース</a> · <a href="#ユースケース">ユーザーごとのプロファイル</a> · <a href="https://powercontext.oceanbase.io/en/docs/workflows/review-dream-revisions/">Dream による自己進化</a> · <a href="#追跡と統制">Scope による分離</a> · <a href="#記憶ルールを-scope-ごとに">Scope ごとの記憶ルール</a> · <a href="#既存のサブスクリプションを使う">既存のサブスクリプションの活用</a>を、ひとつのサービスで。
 </p>
 
 <p align="center">
@@ -35,6 +35,7 @@
 - **複数 Agent の協働：** 複数の Agent、セッション、チームメンバーが同じ Scope の記憶を共有し、引き継ぎで作業を続けます。[ユースケース →](#ユースケース)
 - **自己進化：** Dream が過去の根拠から記憶とプロンプトの改訂を提案し、あなたのレビュー後に反映します。[Dream について →](https://powercontext.oceanbase.io/en/docs/workflows/review-dream-revisions/)
 - **出典をたどれる：** すべての記憶は、根拠となる Source と正確なリビジョンまでたどれます。[詳しく →](#追跡と統制)
+- **Scope ごとのルール：** チーム、プロジェクト、ユーザーごとに記憶ルールを持て、版も残ります。[詳しく →](#記憶ルールを-scope-ごとに)
 - **安全に管理：** Scope ごとにデータと権限を分離し、生成された経験とスキルはレビュー後にのみ想起されます。[詳しく →](#追跡と統制)
 
 サービスとして起動して HTTP、MCP、Python、Agent 連携から使うことも、Core を自分のアプリケーションに組み込むこともできます。
@@ -56,6 +57,17 @@
 <img src="docs/assets/readme-capabilities-en.svg" width="100%" alt="CodeGraph：関連するコードを検索し、更新の有無を確認。Steering：対象を絞った読み込み、操作の一括実行、関連するテスト。Memory：判断を保存し、後のセッションで予算内に収まる範囲で想起。" />
 
 [24 タスクのベンチマーク：結果と集計方法 →](docs/benchmarks/token-savings/README.md) · [メインモデルのリクエスト数 →](docs/benchmarks/token-savings/request-counts_JP.md) · [記憶抽出のコストと品質 →](https://gist.github.com/jasper-yl/d02bfb7d9b45ca175bf74ad09cfa5ba4#file-00-report-en-md)
+
+### 記憶ルールを Scope ごとに
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/readme-prompt-rules-ja-dark.svg" />
+  <img src="docs/assets/readme-prompt-rules-ja-light.svg" width="100%" alt="ひとつの PowerContext Server で、法務チーム、営業の個人 Scope、研究開発プロジェクトがそれぞれ抽出、プロファイル、統合のプロンプトを設定し、版を残す。出力形式、権限、根拠の範囲、機微情報の保護はサーバーが固定する" />
+</picture>
+
+多くの記憶サービスは、抽出ルールをサービス全体やプロジェクト単位で設定します。PowerContext は記憶の抽出、統合、プロファイル生成、Topic Memory のプロンプトを Scope 単位の Artifact として扱うため、チーム、プロジェクト、さらにはユーザー一人ひとりが自分の記憶ルールを持てます。変更はすべて版として残り、いつでも元に戻せます。Dream も過去の根拠から改訂を提案し、レビュー後に反映されます。
+
+ルールが決めるのは「何をどう残すか」だけです。出力形式、ツールと権限、根拠の範囲、機微情報の保護はサーバーが固定するため、ルールを変えてもシステムは壊れません。アクセス制御を有効にすると、変更には Scope の管理権限が必要です。Dashboard にはまだ編集画面がありませんが、アプリケーションは API を通じてこの機能を自分のユーザーに提供できます。[プロンプトの管理 →](https://powercontext.oceanbase.io/en/docs/workflows/manage-prompts/)
 
 ### 追跡と統制
 

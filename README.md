@@ -8,7 +8,7 @@
 <h3 align="center">The open-source context service for AI agents</h3>
 <p align="center">
   Fewer detours. Fewer tokens.<br />
-  <a href="#use-cases">Handoffs</a> · <a href="#use-cases">shared memory across agents</a> · <a href="#use-cases">company knowledge bases</a> · <a href="#use-cases">per-user profiles</a> · <a href="https://powercontext.oceanbase.io/en/docs/workflows/review-dream-revisions/">Dream</a> · <a href="#traceable-and-governed">Scope isolation</a> · <a href="#use-your-existing-subscription">your existing subscription</a>, all in one service.
+  <a href="#use-cases">Handoffs</a> · <a href="#use-cases">shared memory across agents</a> · <a href="#use-cases">company knowledge bases</a> · <a href="#use-cases">per-user profiles</a> · <a href="https://powercontext.oceanbase.io/en/docs/workflows/review-dream-revisions/">Dream</a> · <a href="#traceable-and-governed">Scope isolation</a> · <a href="#memory-rules-for-every-scope">memory rules per Scope</a> · <a href="#use-your-existing-subscription">your existing subscription</a>, all in one service.
 </p>
 
 <p align="center">
@@ -35,6 +35,7 @@
 - **Multi-agent collaboration:** agents, sessions, and teammates share memory in one Scope and pick up work through handoffs. [See use cases →](#use-cases)
 - **Self-improvement:** Dream proposes memory and prompt revisions from past evidence, applied after your review. [About Dream →](https://powercontext.oceanbase.io/en/docs/workflows/review-dream-revisions/)
 - **Traceable:** every memory traces back to its source evidence and exact revision. [Learn more →](#traceable-and-governed)
+- **Per-Scope rules:** every team, project, or user can have its own memory rules, with revisions. [Learn more →](#memory-rules-for-every-scope)
 - **Governed:** Scopes isolate data and access, and generated experiences and skills are recalled only after review. [Learn more →](#traceable-and-governed)
 
 Run it as a service through HTTP, MCP, Python, or Agent integrations, or embed Core in your own application.
@@ -56,6 +57,17 @@ This benchmark runs in **gateway mode**, with code retrieval, working guidance, 
 <img src="docs/assets/readme-capabilities-en.svg" width="100%" alt="CodeGraph: relevant code with freshness checks. Steering: targeted reads, batched work and focused tests. Memory: saved decisions and bounded recall for later sessions." />
 
 [24-task benchmark: results and methodology →](docs/benchmarks/token-savings/README.md) · [Main-model request counts →](docs/benchmarks/token-savings/request-counts.md) · [Memory-extraction cost and quality →](https://gist.github.com/jasper-yl/d02bfb7d9b45ca175bf74ad09cfa5ba4#file-00-report-en-md)
+
+### Memory rules for every Scope
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/readme-prompt-rules-en-dark.svg" />
+  <img src="docs/assets/readme-prompt-rules-en-light.svg" width="100%" alt="In one PowerContext Server, a legal team, a personal sales Scope, and an R&D project customize the extraction, profile, and reconciliation prompts, each with its own revisions; output schema, permissions, evidence boundaries, and sensitive-data safeguards stay fixed by the server" />
+</picture>
+
+Many memory services configure extraction rules for a whole service or project. PowerContext keeps the prompts for memory extraction, reconciliation, profile generation, and Topic Memory as Scope-level artifacts, so every team, project, or even individual user can have its own memory rules. Every change is kept as a revision you can restore, and Dream can propose revisions from past evidence for your review.
+
+Rules decide only what to keep and how to organize it. The output schema, tools and permissions, evidence boundaries, and sensitive-data safeguards stay fixed by the server, so changing a rule cannot break the system. With access control enabled, changes need Scope admin rights. The Dashboard has no editor yet; applications can expose this to their own users through the API. [Manage prompts →](https://powercontext.oceanbase.io/en/docs/workflows/manage-prompts/)
 
 ### Traceable and governed
 

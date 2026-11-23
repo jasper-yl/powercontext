@@ -8,7 +8,7 @@
 <h3 align="center">面向 AI Agent 的开源上下文服务</h3>
 <p align="center">
   让 Agent 少走弯路、少花 Token。<br />
-  <a href="#使用场景">任务交接</a> · <a href="#使用场景">多 Agent 共享</a> · <a href="#使用场景">企业知识库</a> · <a href="#使用场景">用户画像</a> · <a href="https://powercontext.oceanbase.io/zh/docs/workflows/review-dream-revisions/">Dream 自进化</a> · <a href="#可追溯与可管控">Scope 隔离</a> · <a href="#复用已有订阅">复用已有订阅</a>，都在同一个服务里。
+  <a href="#使用场景">任务交接</a> · <a href="#使用场景">多 Agent 共享</a> · <a href="#使用场景">企业知识库</a> · <a href="#使用场景">用户画像</a> · <a href="https://powercontext.oceanbase.io/zh/docs/workflows/review-dream-revisions/">Dream 自进化</a> · <a href="#可追溯与可管控">Scope 隔离</a> · <a href="#记忆规则每个-scope-自己定">按 Scope 定制记忆规则</a> · <a href="#复用已有订阅">复用已有订阅</a>，都在同一个服务里。
 </p>
 
 <p align="center">
@@ -35,6 +35,7 @@
 - **多 Agent 协同：** 多个 Agent、会话和同事共用同一个 Scope 的记忆，用任务交接接续进度。[查看场景 →](#使用场景)
 - **自我进化：** Dream 根据过往依据提出记忆和提示词修订，经你审核后生效。[了解 Dream →](https://powercontext.oceanbase.io/zh/docs/workflows/review-dream-revisions/)
 - **准确可追溯：** 每条记忆都能追溯到来源证据和精确版本。[了解更多 →](#可追溯与可管控)
+- **按 Scope 定制：** 每个团队、项目或用户都可以有自己的记忆规则，并保留版本。[了解更多 →](#记忆规则每个-scope-自己定)
 - **安全可控：** 按 Scope 隔离数据和权限，生成的经验和技能经审核后才会被召回。[了解更多 →](#可追溯与可管控)
 
 可以直接运行服务，通过 HTTP、MCP、Python 或 Agent 集成接入，也可以将 Core 嵌入自己的应用。
@@ -56,6 +57,17 @@
 <img src="docs/assets/readme-capabilities-zh.svg" width="100%" alt="代码检索：查找相关代码，检查代码是否已更新。工作指导：明确读取、修改和验证要求。项目记忆：保存项目决定，供后续会话使用。" />
 
 [24 题评测：逐题结果与统计口径 →](docs/benchmarks/token-savings/README_CN.md) · [主模型请求次数 →](docs/benchmarks/token-savings/request-counts_CN.md) · [记忆提取的成本与质量 →](https://gist.github.com/jasper-yl/d02bfb7d9b45ca175bf74ad09cfa5ba4#file-01-report-zh-md)
+
+### 记忆规则，每个 Scope 自己定
+
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="docs/assets/readme-prompt-rules-zh-dark.svg" />
+  <img src="docs/assets/readme-prompt-rules-zh-light.svg" width="100%" alt="同一个 PowerContext Server 中，法务团队、销售个人 Scope 和研发项目分别定制记忆提取、画像生成和记忆合并的提示词，各自保留版本；输出结构、权限、证据边界和敏感信息保护由服务端固定" />
+</picture>
+
+很多记忆服务按整个服务或项目配置提取规则。PowerContext 把记忆提取、记忆合并、画像生成和主题记忆的提示词做成 Scope 级的制品：每个团队、项目，甚至每位用户，都可以有自己的记忆规则。每次修改都保留版本，可以随时恢复；Dream 也可以根据过往依据提出修订，审核后生效。
+
+规则只决定"记什么、怎么整理"。输出结构、工具和权限，以及证据边界和敏感信息保护，都由服务端固定，改规则不会改坏系统。启用访问控制时，修改需要 Scope 管理权限；Dashboard 暂不提供编辑器，应用可以通过 API 把这项能力开放给自己的用户。[管理提示词 →](https://powercontext.oceanbase.io/zh/docs/workflows/manage-prompts/)
 
 ### 可追溯与可管控
 
