@@ -8,7 +8,7 @@
 <h3 align="center">The open-source context service for AI agents</h3>
 <p align="center">
   Fewer detours. Fewer tokens.<br />
-  <a href="#memory-and-collaboration">Personal memory</a> · <a href="#memory-and-collaboration">handoffs</a> · <a href="#memory-and-collaboration">Dream</a> · <a href="#memory-and-collaboration">shared memory across agents</a> · <a href="#traceable-and-governed">Scope isolation</a>, all in one service.
+  <a href="#memory-and-collaboration">Personal memory</a> · <a href="#memory-and-collaboration">handoffs</a> · <a href="#memory-and-collaboration">Dream</a> · <a href="#memory-and-collaboration">shared memory across agents</a> · <a href="#traceable-and-governed">Scope isolation</a> · <a href="#use-your-existing-subscription">your existing subscription</a>, all in one service.
 </p>
 
 <p align="center">
@@ -54,7 +54,7 @@ Run it as a service through HTTP, MCP, Python, or Agent integrations, or embed C
 
 - **Same 24 tasks, memory generation included:** **32.57% fewer tokens** and **15.42% lower estimated model cost**, with both groups solving the same 16 tasks. Solving alone uses 40.30% fewer tokens; the best task uses 63.49% fewer.
 - **Fewer round trips:** in a separate run on the same task IDs (OFF vs. MS), main-model requests fell from 708 to 539, **23.87% fewer**. That run uses a different configuration, so its numbers do not combine with the ones above.
-- **Memory generation reuses the cache:** generating memories costs tokens, and the 32.57% above includes them. In gateway mode, memory extraction can reuse the context prefix of solving requests; 97% of input to memory-generation calls with recorded cache fields hit the cache.
+- **Memory generation reuses the cache:** generating memories costs tokens, and the 32.57% above includes them. In gateway mode, memory extraction can reuse the context prefix of solving requests, on a Codex subscription too; 97% of input to memory-generation calls with recorded cache fields hit the cache.
 
 This benchmark runs in **gateway mode**, with code retrieval, working guidance, and project memory enabled together:
 
@@ -199,6 +199,15 @@ Verify the workflow you enabled:
 <sub>This starts the context service. It does not automatically reproduce the benchmark's Gateway, CodeGraph, or Steering configuration; see the evidence report.</sub>
 
 </details>
+
+### Use your existing subscription
+
+Already subscribed to Codex, Claude Code, GitHub Copilot, Grok, Gemini, Qwen Code, or Kimi Code? Use it to generate memories, experiences, and profiles, without a separate generation model API:
+
+- **Background generation:** the Server generates memories, experiences, and profiles with your subscription. Inference protection must stay off; Topic Memory and Dream are not supported yet, and embedding still needs its own model.
+- **Agent requests through the gateway:** the agent sends its model requests through the gateway with your subscription, and the gateway injects context and captures the conversation. On a Codex subscription, memory extraction also reuses the prefix cache of the agent's session, counted against the same subscription. Support differs by subscription.
+
+[Configure background generation with a subscription →](https://powercontext.oceanbase.io/en/development/pydantic-ai-inference/#reuse-existing-subscription-credentials) · [Gateway OAuth subscriptions →](https://github.com/oceanbase/powercontext/blob/master/gateway/SUBSCRIPTIONS.md)
 
 ## Ecosystem
 

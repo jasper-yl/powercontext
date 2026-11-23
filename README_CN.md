@@ -8,7 +8,7 @@
 <h3 align="center">面向 AI Agent 的开源上下文服务</h3>
 <p align="center">
   让 Agent 少走弯路、少花 Token。<br />
-  <a href="#记忆与协同">个性化记忆</a> · <a href="#记忆与协同">任务交接</a> · <a href="#记忆与协同">Dream 自进化</a> · <a href="#记忆与协同">多 Agent 共享</a> · <a href="#可追溯与可管控">Scope 隔离</a>，都在同一个服务里。
+  <a href="#记忆与协同">个性化记忆</a> · <a href="#记忆与协同">任务交接</a> · <a href="#记忆与协同">Dream 自进化</a> · <a href="#记忆与协同">多 Agent 共享</a> · <a href="#可追溯与可管控">Scope 隔离</a> · <a href="#复用已有订阅">复用已有订阅</a>，都在同一个服务里。
 </p>
 
 <p align="center">
@@ -54,7 +54,7 @@
 
 - **同 24 题，计入记忆生成：** Token 减少 **32.57%**，估算模型成本降低 **15.42%**，两组解出相同的 16 题。只看解题，Token 减少 40.30%；单题最高减少 63.49%。
 - **往返更少：** 在同一批题号的另一轮实验（OFF 对比 MS）中，主模型请求从 708 次降到 539 次，减少 **23.87%**。这一轮的配置与上面不同，两组数字不能合并计算。
-- **记忆生成也复用缓存：** 生成记忆要花 Token，上面的 32.57% 已经计入。网关模式下可以复用解题请求的上下文前缀；记录了缓存字段的记忆生成调用中，97% 的输入命中了缓存。
+- **记忆生成也复用缓存：** 生成记忆要花 Token，上面的 32.57% 已经计入。网关模式下可以复用解题请求的上下文前缀，用 Codex 订阅时也一样；记录了缓存字段的记忆生成调用中，97% 的输入命中了缓存。
 
 本次评测采用**网关模式**，同时开启代码检索、工作指导和项目记忆：
 
@@ -199,6 +199,15 @@ powercontext doctor codex
 <sub>以上命令用于启动服务。要复现测试中的网关、代码检索和工作指导配置，请查看详细报告。</sub>
 
 </details>
+
+### 复用已有订阅
+
+已经订阅了 Codex、Claude Code、GitHub Copilot、Grok、Gemini、Qwen Code 或 Kimi Code？记忆、经验和画像的生成可以直接用它，不必另配生成模型 API：
+
+- **后台生成：** Server 用订阅生成记忆、经验和画像。此时不能开启推理保护；主题记忆和 Dream 暂不支持，向量模型仍需单独配置。
+- **经过网关的 Agent 请求：** Agent 带着订阅把模型请求发往网关，由网关注入上下文、记录对话。用 Codex 订阅时，记忆抽取还能复用 Agent 会话的前缀缓存，用量计入同一个订阅额度。各订阅支持的范围不同。
+
+[用订阅配置后台生成 →](https://powercontext.oceanbase.io/zh/development/pydantic-ai-inference/#复用已有订阅凭据) · [网关 OAuth 订阅 →](https://github.com/oceanbase/powercontext/blob/master/gateway/SUBSCRIPTIONS.md)
 
 ## 生态
 
